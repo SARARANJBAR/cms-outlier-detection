@@ -11,7 +11,7 @@ An exploration of Medicare provider-level data (Part B billing and Part D prescr
 
 ## Status
 
-Exploring 5,000-row samples of both datasets (2023) to understand structure, scale, and quality before committing to a schema or architecture. See `data/README.md`.
+Exploring 5,000-row samples of both datasets (2023) to understand structure, scale, and quality before committing to a schema or architecture. See `data/Data.md`.
 
 ## Project structure
 
@@ -25,9 +25,10 @@ sql/                         raw .sql files + the optimization writeup (not Pyth
 data/
   raw/                       full/bulk downloads — gitignored, not yet pulled
   samples/                   small committed samples for exploration/dev
+notebooks/                   exploratory analysis (traceable record of what we looked at)
 tests/
 ```
 
 ## Data source
 
-Public CMS data (data.cms.gov): the **Medicare Physician & Other Practitioners by Provider and Service** (Part B) and **Medicare Part D Prescribers by Provider and Drug** datasets. Full details on structure, download process, and the columns in each — see `data/README.md`.
+Public CMS data (data.cms.gov): the **Medicare Physician & Other Practitioners by Provider and Service** (Part B) and **Medicare Part D Prescribers by Provider and Drug** datasets. Full details on structure, download process, and the columns in each — see `data/Data.md`.
