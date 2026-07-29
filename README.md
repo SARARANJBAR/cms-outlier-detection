@@ -11,7 +11,7 @@ An exploration of Medicare provider-level data (Part B billing and Part D prescr
 
 ## Status
 
-Exploring 5,000-row samples of both datasets (2023) to understand structure, scale, and quality before committing to a schema or architecture. See `data/Data.md`.
+Explored 5,000-row samples of both datasets (2023) and pulled the full 2023 files locally (~9.7M rows / 2.9 GB for Part B, ~26.8M rows / 3.6 GB for Part D). Next: SQL schema design. See `data/Data.md`.
 
 ## Project structure
 

@@ -24,8 +24,7 @@ def fetch_catalog() -> list[dict]:
     return resp.json()["dataset"]
 
 
-def find_api_url(catalog: list[dict], dataset: str, year: int) -> str:
-    """Return the paginated JSON API URL for `dataset` (see DATASET_TITLES) and `year`."""
+def _find_distribution(catalog: list[dict], dataset: str, year: int, fmt: str) -> dict:
     title = DATASET_TITLES[dataset]
     matches = [item for item in catalog if item.get("title") == title]
     if not matches:
@@ -33,9 +32,19 @@ def find_api_url(catalog: list[dict], dataset: str, year: int) -> str:
 
     year_start = f"{year}-01-01"
     for distribution in matches[0]["distribution"]:
-        if distribution.get("format") != "API":
+        if distribution.get("format") != fmt:
             continue
         if distribution.get("temporal", "").startswith(year_start):
-            return distribution["accessURL"]
+            return distribution
 
-    raise ValueError(f"No API distribution found for {dataset!r} year {year}")
+    raise ValueError(f"No {fmt} distribution found for {dataset!r} year {year}")
+
+
+def find_api_url(catalog: list[dict], dataset: str, year: int) -> str:
+    """Return the paginated JSON API URL for `dataset` (see DATASET_TITLES) and `year`."""
+    return _find_distribution(catalog, dataset, year, "API")["accessURL"]
+
+
+def find_csv_url(catalog: list[dict], dataset: str, year: int) -> str:
+    """Return the full bulk-download CSV URL for `dataset` and `year`."""
+    return _find_distribution(catalog, dataset, year, "CSV")["downloadURL"]

@@ -19,16 +19,23 @@ We're using two provider-level datasets:
 
 ## How to download
 
-[catalog.py](../src/cms_outliers/data/catalog.py) resolves the correct per-year API URL for a dataset by fetching `data.json` live and matching on title + year. [pull_samples.py](../src/cms_outliers/data/pull_samples.py) paginates the JSON API (`size`/`offset`) to pull a fixed number of rows and writes them to `data/samples/<dataset>_<year>_sample.csv`.
+[catalog.py](../src/cms_outliers/data/catalog.py) resolves the correct per-year URL for a dataset by fetching `data.json` live and matching on title + year — for both the paginated JSON API and the full CSV distribution.
 
-Run it with:
+**Samples** — [pull_samples.py](../src/cms_outliers/data/pull_samples.py) paginates the JSON API (`size`/`offset`) to pull a fixed number of rows and writes them to `data/samples/<dataset>_<year>_sample.csv`.
 
 ```
 uv run python -m cms_outliers.data.pull_samples --dataset part_b --year 2023 --rows 5000
 uv run python -m cms_outliers.data.pull_samples --dataset part_d --year 2023 --rows 5000
 ```
 
-- `data/raw/` — full/bulk downloads (not yet pulled). **Gitignored** — too large to commit.
+**Full downloads** — [pull_full.py](../src/cms_outliers/data/pull_full.py) streams CMS's published bulk CSV directly to disk (not the paginated API — a full year is tens of millions of rows) and writes to `data/raw/<dataset>_<year>_full.csv`.
+
+```
+uv run python -m cms_outliers.data.pull_full --dataset part_b --year 2023
+uv run python -m cms_outliers.data.pull_full --dataset part_d --year 2023
+```
+
+- `data/raw/` — full/bulk downloads. **Gitignored** — too large to commit; provenance tracked below instead.
 - `data/samples/` — small samples used to explore the data together and for local dev/tests. **Committed to git.**
 
 ### Samples pulled
@@ -39,6 +46,15 @@ uv run python -m cms_outliers.data.pull_samples --dataset part_d --year 2023 --r
 | `data/samples/part_d_2023_sample.csv` | Part D (Prescribers by Provider and Drug) | 2023 | 5,000 | `https://data.cms.gov/data-api/v1/dataset/e54db557-cd82-4e91-a0fe-61aad5865d69/data` |
 
 note, though 2024 release is the latest, CMS's own `modified` timestamps showed it had been revised as recently as 2026-05. 2023 looked more final as of 2026-07.
+
+### Full downloads
+
+| File | Dataset | Year | Rows | Size | Downloaded | Source |
+|---|---|---|---|---|---|---|
+| `data/raw/part_b_2023_full.csv` | Part B | 2023 | 9,660,647 | 2.9 GB | 2026-07-29 | `https://data.cms.gov/sites/default/files/2025-04/e3f823f8-db5b-4cc7-ba04-e7ae92b99757/MUP_PHY_R25_P05_V20_D23_Prov_Svc.csv` |
+| `data/raw/part_d_2023_full.csv` | Part D | 2023 | 26,794,878 | 3.6 GB | 2026-07-29 | `https://data.cms.gov/sites/default/files/2025-04/0d5915ce-002c-4d87-bde8-24ffb08bb6cc/MUP_DPR_RY25_P04_V10_DY23_NPIBN.csv` |
+
+These are local-only (gitignored) — anyone reproducing this needs to re-run `pull_full.py`, which will resolve the current URLs live rather than relying on the ones above (CMS may rotate them on republish).
 
 ### Columns
 
