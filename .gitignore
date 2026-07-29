@@ -1,1 +1,10 @@
 CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Large raw data pulls — keep only small samples in git
+data/raw/*
+!data/raw/.gitkeep
