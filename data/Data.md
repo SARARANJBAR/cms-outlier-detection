@@ -100,4 +100,12 @@ These are local-only (gitignored) — anyone reproducing this needs to re-run `p
 
 ### Exploration
 
-See [01_explore_samples.ipynb](../notebooks/01_explore_samples.ipynb) for cardinality, null/suppression patterns, and other data quality findings.
+- [01_explore_samples.ipynb](../notebooks/01_explore_samples.ipynb) — first look at the 5,000-row samples: columns, dtypes, cardinality, and the sampling bias in the API pull.
+- [02_distributions.ipynb](../notebooks/02_distributions.ipynb) — the full 2023 data: value distributions, peer-group sizes, provider overlap between the two datasets, and both suppression rules. Row counts in the table above were confirmed here.
+
+The data model built on top of these findings is in [docs/schema.md](../docs/schema.md).
+
+Two quirks worth knowing before using either file:
+
+- **Part B service counts are fractional.** `Tot_Srvcs` is a float, and its measured minimum is 5.5.
+- **The suppression rules differ.** Part D blanks `Tot_Benes` when fewer than 11 patients are involved (55.08% of rows). Part B instead omits the row entirely when fewer than 11 beneficiaries are involved, so Part B has no nulls in its measure columns at all — its censoring is invisible, and low-volume providers are systematically absent.

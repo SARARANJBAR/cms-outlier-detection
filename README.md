@@ -6,26 +6,43 @@ A portfolio project built on public CMS (Centers for Medicare & Medicaid Service
 
 An exploration of Medicare provider-level data (Part B billing and Part D prescribing) to surface outliers — providers whose utilization, cost, or prescribing patterns differ significantly from their peers (same specialty, same geography). The project has two parts:
 
-1. **SQL / data engineering** — real multi-table joins (providers, claims, drug/procedure reference data, geography), window functions for peer-relative outlier scoring, and a documented query optimization case study (naive query vs. indexed/partitioned, with `EXPLAIN ANALYZE` evidence).
+1. **SQL / data engineering** — real multi-table joins (providers, claims, drug/procedure reference data, geography), window functions for peer-relative outlier scoring, and a documented query optimization case study: *how to get interactive latency on 36M rows*, with each step measured — file layout and sort order, zone-map and partition pruning, projection pushdown, and a precomputed peer-statistics table.
 2. **Streamlit app** — an interactive dashboard where a user picks a specialty and procedure/drug and sees where a given provider, state, or peer group sits in the distribution, with geographic and year-over-year views.
 
 ## Status
 
-Explored 5,000-row samples of both datasets (2023) and pulled the full 2023 files locally (~9.7M rows / 2.9 GB for Part B, ~26.8M rows / 3.6 GB for Part D). Next: SQL schema design. See `data/Data.md`.
+Full 2023 data pulled locally (9,660,647 rows / 2.9 GB for Part B, 26,794,878 rows / 3.6 GB for Part D) and explored end to end. Engine and storage format decided; schema designed. Next: the CSV → Parquet build script.
+
+Decisions and findings so far:
+
+- **[ADR 0001](docs/adr/0001-duckdb-parquet-storage.md)** — DuckDB as the engine of record over Hive-partitioned Parquet, with a precomputed peer-statistics table as the serving layer. Includes the PostgreSQL alternative and why it was rejected, plus a dated amendment recording what the measurements later changed.
+- **[docs/schema.md](docs/schema.md)** — star schema, natural keys, peer-group definitions, and the two datasets' very different suppression rules.
+- **[notebooks/02_distributions.ipynb](notebooks/02_distributions.ipynb)** — the measurements everything above rests on: value distributions, peer-group sizes, cardinality, and data-quality findings across all 36M rows.
+
+Three findings that shaped the design:
+
+- Peer groups are tiny — median 4 rows (Part B) and 5 (Part D). Requiring at least 30 peers before scoring a provider excludes 77.9% of Part B peer groups but only **1.95% of rows**, so statistical honesty is nearly free here.
+- The measures are heavy-tailed enough that mean and standard deviation are unusable: `mean/median` reaches 12.7 for Part D cost-per-claim. Scoring uses percentile rank and median/MAD instead.
+- The two datasets censor small counts differently. Part D blanks a column — `Tot_Benes` is null on **55.08%** of rows. Part B removes the row entirely, so its censoring produces no nulls at all and is invisible unless you go looking for it.
 
 ## Project structure
 
 ```
 pyproject.toml, uv.lock      Python project managed with uv
+docs/
+  adr/                       architecture decision records
+  schema.md                  data model: tables, keys, peer groups, suppression rules
 src/cms_outliers/
-  data/                      dataset catalog lookup + sample-pull script
-  sql/                       (planned) SQL loaders/query runners
+  data/                      dataset catalog lookup + sample and full pull scripts
+  sql/                       (planned) Parquet build + query runners
   app/                       (planned) Streamlit app
 sql/                         raw .sql files + the optimization writeup (not Python)
 data/
-  raw/                       full/bulk downloads — gitignored, not yet pulled
+  raw/                       full bulk downloads — gitignored; re-pull with pull_full.py
   samples/                   small committed samples for exploration/dev
-notebooks/                   exploratory analysis (traceable record of what we looked at)
+notebooks/
+  01_explore_samples.ipynb   columns, cardinality and quirks, on the 5k samples
+  02_distributions.ipynb     distributions, peer-group sizes and data quality, full data
 tests/
 ```
 

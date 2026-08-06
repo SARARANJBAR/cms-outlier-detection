@@ -1,4 +1,5 @@
 CLAUDE.md
+TODO.md
 
 # Python
 __pycache__/
@@ -8,3 +9,6 @@ __pycache__/
 # Large raw data pulls — keep only small samples in git
 data/raw/*
 !data/raw/.gitkeep
+
+# macOS
+.DS_Store
