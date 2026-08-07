@@ -67,6 +67,15 @@ REPORT_PATHS = {
 # the fact tables and peer_stats cannot drift apart on it.
 MIN_PEERS = 30
 
+# Decimal places the stored percentile ranks are rounded to: 4 is basis points, one digit
+# finer than the app displays. This is a size decision, not a cosmetic one. Unrounded,
+# cume_dist() over a large peer group gives nearly every row a distinct DOUBLE — 19.6M
+# distinct values in one Part D column, 128 MB. At basis points it is 10,001 values and
+# 43 MB, because Parquet dictionary-encodes the repeats. Rounding to 0.1% instead would cut
+# it to 11 MB; narrowing to FLOAT rather than rounding makes it *worse* (45.9 MB), since the
+# dictionary is what pays and a narrower physical type is not.
+RANK_DECIMALS = 4
+
 
 @dataclass(frozen=True)
 class Table:
@@ -186,7 +195,7 @@ def read_sql(*parts: str, **params: str) -> str:
 
 
 def build_sql(table: Table) -> str:
-    return read_sql("build", table.sql_file, min_peers=str(MIN_PEERS))
+    return read_sql("build", table.sql_file, min_peers=str(MIN_PEERS), rank_dp=str(RANK_DECIMALS))
 
 
 def parquet_path(source: str, table: Table, year: int) -> Path:

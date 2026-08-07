@@ -44,16 +44,16 @@ SELECT
     Avg_Mdcr_Pymt_Amt           AS avg_medicare_payment,
     Avg_Mdcr_Stdzd_Amt          AS avg_medicare_standardized,
     CASE WHEN count(*) OVER peer >= $min_peers
-         THEN cume_dist() OVER (peer ORDER BY Tot_Srvcs)
+         THEN round(cume_dist() OVER (peer ORDER BY Tot_Srvcs), $rank_dp)
     END                         AS tot_srvcs_pct,
     CASE WHEN count(*) OVER peer >= $min_peers
-         THEN cume_dist() OVER (peer ORDER BY Tot_Benes)
+         THEN round(cume_dist() OVER (peer ORDER BY Tot_Benes), $rank_dp)
     END                         AS tot_benes_pct,
     CASE WHEN count(*) OVER peer >= $min_peers
-         THEN cume_dist() OVER (peer ORDER BY Avg_Mdcr_Stdzd_Amt)
+         THEN round(cume_dist() OVER (peer ORDER BY Avg_Mdcr_Stdzd_Amt), $rank_dp)
     END                         AS avg_medicare_standardized_pct,
     CASE WHEN count(*) OVER peer >= $min_peers
-         THEN cume_dist() OVER (peer ORDER BY Tot_Srvcs * Avg_Mdcr_Pymt_Amt)
+         THEN round(cume_dist() OVER (peer ORDER BY Tot_Srvcs * Avg_Mdcr_Pymt_Amt), $rank_dp)
     END                         AS total_medicare_payment_pct
 FROM raw_part_b
 WINDOW peer AS (PARTITION BY Rndrng_Prvdr_Type, HCPCS_Cd, Place_Of_Srvc);

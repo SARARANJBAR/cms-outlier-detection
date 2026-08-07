@@ -203,16 +203,21 @@ build regenerates; the four that change what this ADR says:
   app answers its main question from 3.3 MB and never opens a fact table to draw a
   distribution. That is lever 6, and it is now an artifact rather than a plan.
 
-- **The precomputed ranks cost a third of the fact files, and ties are why.** Each fact row
-  carries its percentile rank within its peer group, so the drill-down path is a lookup too.
-  Those columns are 30% of `fact_part_b_service` (which grew 247.5 → 352.2 MB) and 36% of
-  `fact_part_d_drug` (503.3 → 794.0 MB), and the spread between them is the interesting
-  part: `tot_claims_pct` is 43 MB while `cost_per_claim_pct` is 128 MB, off the same 26.8M
-  rows. Claims are small integers with many ties, so `cume_dist()` returns few distinct
-  values per group and the column encodes well; cost is continuous, so nearly every row gets
-  its own value. The core layer is now 1.12 GB, still inside a Release asset's 2 GB but with
-  a third of the headroom spent. Rounding the ranks to display precision would recover most
-  of it and is worth measuring before publishing — noted, not done.
+- **The precomputed ranks are the biggest storage lever in the build, and rounding is how
+  it is pulled.** Each fact row carries its percentile rank within its peer group, so the
+  drill-down path is a lookup too. At full DOUBLE precision those columns were 30% of
+  `fact_part_b_service` and 36% of `fact_part_d_drug`, because `cume_dist()` over a large
+  group gives nearly every row a distinct value — 19.6M distinct in one Part D column,
+  128 MB for it alone. Rounded to basis points, one digit finer than the app displays, it is
+  10,001 distinct values and 43 MB. The core layer landed at **941 MB** rather than 1,146 MB,
+  and the rank columns at 19.3% / 19.6%.
+
+  Two measurements from that exercise belong in the writeup rather than only here. Narrowing
+  the type to `FLOAT` instead of rounding makes the file *larger* (45.9 MB against 43.3), so
+  the dictionary is what pays and the obvious move is the wrong one. And before rounding,
+  `tot_claims_pct` cost 43 MB against `cost_per_claim_pct`'s 128 MB off identical rows,
+  because claims are integers with many ties and cost is continuous — the compressibility of
+  a derived column is a property of the tie structure of what it derives from.
 
 - **A number in the 2026-08-06 amendment above was wrong.** It said the brand peer key
   "leaves coverage essentially unchanged" against the generic key. Measured on the built

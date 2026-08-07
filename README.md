@@ -11,7 +11,7 @@ An exploration of Medicare provider-level data (Part B billing and Part D prescr
 
 ## Status
 
-Full 2023 data pulled locally (9,660,647 rows / 2.9 GB for Part B, 26,794,878 rows / 3.6 GB for Part D) and explored end to end. Engine and storage format decided, schema designed, and the whole model now builds from the raw CSV with its integrity checks passing: 36.5M fact rows carrying precomputed peer ranks in 1.12 GB of Parquet, plus a 3.3 MB peer-statistics table that ships in the repo and answers the app's main query without touching the facts. Next: the optimization notebook.
+Full 2023 data pulled locally (9,660,647 rows / 2.9 GB for Part B, 26,794,878 rows / 3.6 GB for Part D) and explored end to end. Engine and storage format decided, schema designed, and the whole model now builds from the raw CSV with its integrity checks passing: 36.5M fact rows carrying precomputed peer ranks in 941 MB of Parquet, plus a 3.3 MB peer-statistics table that ships in the repo and answers the app's main query without touching the facts. Next: the optimization notebook.
 
 Decisions and findings so far:
 

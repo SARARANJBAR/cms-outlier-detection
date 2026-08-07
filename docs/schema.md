@@ -128,7 +128,7 @@ rather than assumed, along with whether any single NPI carries more than one nam
 | `avg_medicare_allowed` | DOUBLE | What Medicare allows |
 | `avg_medicare_payment` | DOUBLE | What Medicare actually paid |
 | `avg_medicare_standardized` | DOUBLE | Payment with geographic cost adjustment removed — the column for cross-region comparison |
-| `tot_srvcs_pct`, `tot_benes_pct`, `avg_medicare_standardized_pct`, `total_medicare_payment_pct` | DOUBLE | Precomputed percentile rank within the peer group — see below. NULL when the group has fewer than 30 rows |
+| `tot_srvcs_pct`, `tot_benes_pct`, `avg_medicare_standardized_pct`, `total_medicare_payment_pct` | DOUBLE | Precomputed percentile rank within the peer group, rounded to basis points — see below. NULL when the group has fewer than 30 rows |
 | `year` | BIGINT | Partition key. Not stored in the file — the Hive directory `year=2023/` carries it, which is the convention and stops the column existing twice on read. DuckDB infers it as BIGINT from the path |
 
 The `avg_*` columns are **per-service averages, not totals**. Total Medicare payment for
@@ -155,7 +155,7 @@ outlier shows up, and a rank is the one thing the app cannot compute from a sing
 | `tot_drug_cost` | DOUBLE | Never null. Already a total, unlike Part B |
 | `tot_benes` | BIGINT | **Null on 55.08% of rows** — see suppression below |
 | `ge65_*` | various | The 65+ breakdown and its suppression flags |
-| `tot_claims_pct`, `tot_drug_cost_pct`, `cost_per_claim_pct` | DOUBLE | Precomputed percentile rank within the peer group. No per-beneficiary measure is ranked, because `tot_benes` is suppressed on 55.08% of rows |
+| `tot_claims_pct`, `tot_drug_cost_pct`, `cost_per_claim_pct` | DOUBLE | Precomputed percentile rank within the peer group, rounded to basis points. No per-beneficiary measure is ranked, because `tot_benes` is suppressed on 55.08% of rows |
 | `year` | BIGINT | Partition key — carried by the Hive directory, not stored in the file |
 
 ## Reference dimensions
@@ -319,26 +319,41 @@ Types are declared rather than sniffed, which makes them assertions: DuckDB's ow
 over all 36M rows reads NPI as BIGINT and RUCA as DOUBLE, and both would be quietly wrong
 here.
 
-## What the precomputed ranks cost
+## What the precomputed ranks cost, and why they are rounded
 
 Storing each row's peer rank is what makes the drill-down path a lookup instead of a scan.
-Measured, those columns are **30% of `fact_part_b_service` and 36% of `fact_part_d_drug`**,
-and the spread between individual columns is the part worth knowing:
+The ranks are **rounded to four decimal places** — basis points, one digit finer than the
+app displays. That is a storage decision, and it was the largest single one in the build.
 
-| Column | Bytes | Share of file |
+Unrounded, `cume_dist()` over a large peer group hands nearly every row its own DOUBLE.
+Measured on `fact_part_d_drug.cost_per_claim_pct`, 26.8M rows:
+
+| Variant | Size | Distinct values |
 |---|---:|---:|
-| `fact_part_d_drug.cost_per_claim_pct` | 128,158,239 | 15.7% |
-| `fact_part_d_drug.tot_claims_pct` | 43,164,232 | 5.3% |
+| Full DOUBLE precision | 128.1 MB | 19,581,847 |
+| Rounded to basis points | 43.3 MB | 10,001 |
+| Rounded to basis points, then `FLOAT` | 45.9 MB | 10,001 |
+| Rounded to 0.1% | 11.2 MB | 1,001 |
 
-Same 26.8M rows, same function, three times the bytes. Claims are small integers with many
-ties, so `cume_dist()` returns few distinct values per group and the column encodes into
-almost nothing; cost is continuous, so nearly every row gets a distinct rank. **How
-compressible a precomputed rank is depends on how many ties the underlying measure has** —
-which is not obvious until you look.
+Two things in that table are worth more than the 66% saving:
 
-Consequence worth flagging: the ranks are displayed at two decimal places, so full DOUBLE
-precision is storing detail no one reads. Rounding them would recover most of this and is
-worth measuring before the Release asset is published (ADR 0001, third amendment).
+**`FLOAT` is worse than a rounded `DOUBLE`.** Halving the physical width made the file
+*bigger*. What pays here is the dictionary — 10,001 repeated values encode to almost
+nothing regardless of how wide each one is — and a narrower type buys nothing while
+disturbing the encoding. Reaching for the smaller type is the obvious move and the wrong one.
+
+**Before rounding, the columns differed threefold for a reason that is invisible in the
+schema.** `tot_claims_pct` was 43 MB against `cost_per_claim_pct`'s 128 MB, off the same
+rows with the same function. Claims are small integers with many ties, so `cume_dist()`
+returns few distinct values per group; cost is continuous, so it returns one per row. How
+compressible a precomputed rank is depends on the tie structure of the measure underneath
+it. Rounding erases that difference, because it imposes ties on everything: the seven rank
+columns now sit between 14 and 53 MB with no outlier.
+
+Net effect: the rank columns are **19.3% of `fact_part_b_service` and 19.6% of
+`fact_part_d_drug`**, down from 30% and 36%, and the whole core layer fell from 1,146 MB to
+941 MB. Rounding to 0.1% instead would save roughly 90 MB more, and is the lever to pull if
+the Release asset ever gets close to its 2 GB limit.
 
 ## Resolved by the build
 
@@ -352,12 +367,11 @@ worth measuring before the Release asset is published (ADR 0001, third amendment
 - **The two artifacts agree on who is scoreable.** The fact tables' non-null `*_pct` groups
   and `peer_stats`' rows match exactly, on both datasets, so the app cannot mark a provider
   on a distribution that was never built.
-- **Sizes**: 352.2 MB (Part B) and 794.0 MB (Part D) with ranks included, from 6.5 GB of
+- **Sizes**: 304.7 MB (Part B) and 636.6 MB (Part D) with ranks included, from 6.5 GB of
   CSV, plus a 3.3 MB `peer_stats`.
 - **The brand peer key costs more than the ADR first said** — 0.91% of Part D rows against
   the generic key's 0.71%, not "essentially unchanged." Recomputed every build.
 
 ## Open
 
-- Bytes read per drill-down query against the remote Parquet, and whether rounding the rank
-  columns is worth it — see ADR 0001.
+- Bytes read per drill-down query against the remote Parquet — see ADR 0001.

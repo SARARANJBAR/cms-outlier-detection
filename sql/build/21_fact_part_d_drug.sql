@@ -45,13 +45,13 @@ SELECT
     GE65_Bene_Sprsn_Flag        AS ge65_bene_suppression_flag,
     GE65_Tot_Benes              AS ge65_tot_benes,
     CASE WHEN count(*) OVER peer >= $min_peers
-         THEN cume_dist() OVER (peer ORDER BY Tot_Clms)
+         THEN round(cume_dist() OVER (peer ORDER BY Tot_Clms), $rank_dp)
     END                         AS tot_claims_pct,
     CASE WHEN count(*) OVER peer >= $min_peers
-         THEN cume_dist() OVER (peer ORDER BY Tot_Drug_Cst)
+         THEN round(cume_dist() OVER (peer ORDER BY Tot_Drug_Cst), $rank_dp)
     END                         AS tot_drug_cost_pct,
     CASE WHEN count(*) OVER peer >= $min_peers
-         THEN cume_dist() OVER (peer ORDER BY Tot_Drug_Cst / Tot_Clms)
+         THEN round(cume_dist() OVER (peer ORDER BY Tot_Drug_Cst / Tot_Clms), $rank_dp)
     END                         AS cost_per_claim_pct
 FROM raw_part_d
 WINDOW peer AS (PARTITION BY Prscrbr_Type, Brnd_Name);
