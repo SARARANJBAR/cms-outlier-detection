@@ -2,7 +2,7 @@
 
 Date: 2026-08-04
 
-Status: Accepted — amended 2026-08-06 and 2026-08-07, see [Amendments](#amendments)
+Status: Accepted — amended 2026-08-06 and twice on 2026-08-07, see [Amendments](#amendments)
 
 ## Context
 
@@ -228,15 +228,60 @@ build regenerates; the four that change what this ADR says:
   `sql/checks/14_peer_stats.sql` now recomputes both figures on every build so the trade
   stays a measurement.
 
+### 2026-08-07 — the optimization measurements
+
+[`notebooks/03_optimization.ipynb`](../../notebooks/03_optimization.ipynb) measures the
+levers, reading the fact table over a local HTTP server that counts every byte it serves —
+so the drill-down numbers are real range requests, not a model of them.
+
+| Lever | Measured |
+|---|---|
+| 1. CSV → typed Parquet | 128x faster warm, 9.6x smaller on disk |
+| 2. Sort order → zone-map pruning | 26x fewer bytes over HTTP than the same data unsorted (0.56% of the file vs 14.62%) |
+| 4. Projection pushdown | 3.6x fewer bytes than `SELECT *` |
+| 6. Precomputed `peer_stats` | 23.8x faster than the same percentile over the remote facts |
+| 3. Partition pruning | not measured — one partition loaded |
+
+Four things worth recording beyond the table.
+
+- **On the remote path, latency is dominated by round trips, not bytes.** The live
+  percentile over the remote facts reads only 555 KB — but it takes 68.8 ms, while the same
+  query over the *local* 319 MB file takes 4.5 ms. Roughly 200 range requests, each with its
+  own round trip, cost far more than the bytes inside them. This does not contradict the
+  second amendment's "bytes read is the right metric" — bytes are what a Release asset and a
+  free tier are billed in — but it adds that **request count is the right metric for
+  latency**, and the two do not always move together. Any future tuning of the drill-down
+  path should be about merging requests, not shrinking them.
+
+- **`peer_stats` earns its place against the right baseline.** Against the live percentile
+  over *local* Parquet it is only ~1.6x faster, because lever 2 already made that query fast.
+  Against the deployment baseline — the same percentile over the remote facts, which is what
+  an app without a serving layer would do — it is 23.8x. The comparison that flatters the
+  live path is the one that does not describe the deployment, so the honest framing is the
+  remote one.
+
+- **The "~1 row group out of ~79" prediction was too optimistic, for an instructive reason.**
+  Measured, 8 of 79 row groups can contain `Nurse Practitioner`. The prediction reasoned from
+  peer-group size (median 4 rows), but the zone map is per column: the `specialty` statistics
+  prune to the specialty's *whole* span, and the largest specialty spans 8 row groups. Sorting
+  by `(specialty, code)` still delivers the win — 0.56% of the file — just through the
+  combination of both columns' statistics rather than one row group.
+
+- **Sorting also made the file 21% smaller** — 319.5 MB against 407.3 MB for identical rows in
+  random order. Sort order was chosen for pruning; better compression came free, because runs
+  of repeated values are what both mechanisms exploit.
+
 ## Open questions
 
 - **Cold latency over HTTP.** Remote Parquet reads have not been exercised at all. If
   first-interaction latency turns out to be unacceptable, the fallback is shipping
   `dim_provider` alongside `peer_stats` — see the third amendment for why that is known to
   fit — but it is not chosen until the number exists.
-- **Cold-cache timings.** Every timing measured so far is warm — the files had been read
-  earlier in the same session. The CSV-vs-Parquet comparison needs both formats measured
-  the same way, cold and warm, or the speedup figure is meaningless.
+- **Cold-cache timings.** Every local timing is still warm; dropping the macOS page cache
+  needs `sudo purge`, which the notebook cannot do unattended, so it reports the gap instead
+  of filling it with a mislabelled number. The lever-1 speedup (128x) should be read as
+  warm-only. This matters less than it did when it was written: the drill-down path is now
+  measured in bytes and requests over HTTP, which is not a cache-warmth question.
 
 ## Environment
 

@@ -27,7 +27,13 @@ filter the dimensions, aggregate the facts.
 `peer_stats` is not a normal dimension or fact. It is a **precomputed serving layer**:
 the percentile breakpoints for every peer group, calculated once at build time so the
 app never computes a percentile over 36M rows while a user waits. It is lever 6 of the
-optimization writeup and the main reason the dashboard can be fast.
+optimization writeup, measured at **23.8x faster** than computing the same percentile over
+the remote fact table ([notebook 03](../notebooks/03_optimization.ipynb)).
+
+Worth knowing what that number is *not*: against the live percentile over a **local** Parquet
+file the gap is only about 1.6x, because sorting the file already made that query fast. The
+serving layer earns its place against the deployment baseline — remote facts over HTTP — not
+against a warm local benchmark.
 
 ## Keys: natural, not surrogate
 

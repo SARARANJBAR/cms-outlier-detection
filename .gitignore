@@ -17,3 +17,4 @@ data/raw/*
 data/parquet/
 data/parquet-samples/
 data/.duckdb_tmp/
+data/parquet-unsorted/
