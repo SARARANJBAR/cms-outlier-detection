@@ -81,15 +81,22 @@ RANK_DECIMALS = 4
 class Table:
     """A table to build. ``order_by`` is the physical sort order of the Parquet file.
 
-    ``stage`` is both where the output goes and where its input comes from. A "core" table
-    is built from the raw CSVs; a "serving" table is built from the core Parquet, which is
-    why the build runs in two passes.
+    Two independent axes, which used to be conflated:
+
+    ``dest`` is where the output goes — ``core`` for the big gitignored layer that ships as a
+    Release asset, ``serving`` for the small artifacts committed to the repo so a clone and a
+    hosted deploy have them. A table is in ``serving`` because it is *small and needed at
+    query time*, not because of how it is built.
+
+    ``from_parquet`` is where the input comes from: ``False`` reads the raw CSVs in pass 1,
+    ``True`` reads the pass-1 Parquet in pass 2.
     """
 
     name: str
     sql_file: str
     order_by: str
-    stage: str = "core"
+    dest: str = "core"
+    from_parquet: bool = False
 
 
 @dataclass(frozen=True)
@@ -108,8 +115,10 @@ class Check:
 # single-peer-group filter contiguous on disk.
 TABLES = (
     Table("dim_provider", "10_dim_provider.sql", "npi"),
-    Table("dim_hcpcs", "11_dim_hcpcs.sql", "hcpcs_code"),
-    Table("dim_drug", "12_dim_drug.sql", "brand_name, generic_name"),
+    # 112 KB and 42 KB. They hold the human-readable procedure and drug names, so shipping
+    # them means the hosted app can label a peer group instead of showing a bare code.
+    Table("dim_hcpcs", "11_dim_hcpcs.sql", "hcpcs_code", dest="serving"),
+    Table("dim_drug", "12_dim_drug.sql", "brand_name, generic_name", dest="serving"),
     Table("dim_geography", "13_dim_geography.sql", "state"),
     Table("dim_ruca", "14_dim_ruca.sql", "ruca"),
     Table(
@@ -122,11 +131,12 @@ TABLES = (
         "peer_stats",
         "30_peer_stats.sql",
         "dataset, specialty, code, place_of_service, measure",
-        stage="serving",
+        dest="serving",
+        from_parquet=True,
     ),
 )
-CORE_TABLES = tuple(t for t in TABLES if t.stage == "core")
-SERVING_TABLES = tuple(t for t in TABLES if t.stage == "serving")
+PASS_1 = tuple(t for t in TABLES if not t.from_parquet)
+PASS_2 = tuple(t for t in TABLES if t.from_parquet)
 
 CHECKS = (
     Check(
@@ -199,7 +209,7 @@ def build_sql(table: Table) -> str:
 
 
 def parquet_path(source: str, table: Table, year: int) -> Path:
-    return OUT_DIRS[source][table.stage] / table.name / f"year={year}" / "data.parquet"
+    return OUT_DIRS[source][table.dest] / table.name / f"year={year}" / "data.parquet"
 
 
 def csv_path(source: str, dataset: str, year: int) -> Path:
@@ -224,8 +234,8 @@ def connect(source: str, year: int) -> duckdb.DuckDBPyConnection:
 
 
 def use_csv_views(con: duckdb.DuckDBPyConnection) -> None:
-    """Point the core table names back at the CSV-backed model."""
-    for table in CORE_TABLES:
+    """Point the pass-1 table names back at the CSV-backed model."""
+    for table in PASS_1:
         con.execute(build_sql(table))
 
 
@@ -237,7 +247,7 @@ def use_parquet_views(
 ) -> None:
     """Point table names at the Parquet already written for them."""
     for table in tables:
-        path = OUT_DIRS[source][table.stage] / table.name / "**" / "*.parquet"
+        path = OUT_DIRS[source][table.dest] / table.name / "**" / "*.parquet"
         con.execute(
             f"CREATE OR REPLACE VIEW {table.name} AS "
             f"SELECT * FROM read_parquet('{path.as_posix()}', hive_partitioning = true)"
@@ -274,7 +284,7 @@ def build(
                 "row_groups": row_groups,
                 "seconds": elapsed,
                 "order_by": table.order_by,
-                "stage": table.stage,
+                "dest": table.dest,
             }
         )
         print(f"  {rows:,} rows, {out.stat().st_size / 1e6:,.1f} MB, {elapsed:,.1f}s")
@@ -290,7 +300,7 @@ def column_footprint(con: duckdb.DuckDBPyConnection, source: str, year: int) -> 
     (lever 4) can only save what a column actually costs, so this is the ceiling on it.
     """
     results = []
-    for table in (t for t in TABLES if t.name.startswith("fact_") or t.stage == "serving"):
+    for table in (t for t in TABLES if t.name.startswith("fact_") or t.name == "peer_stats"):
         path = parquet_path(source, table, year)
         rows = con.execute(
             "SELECT path_in_schema AS column_name, sum(total_compressed_size) AS bytes "
@@ -404,12 +414,12 @@ def write_report(
         "",
         "`core` tables go out as a Release asset; `serving` ships in the repo.",
         "",
-        "| Table | Stage | Rows | Parquet bytes | Row groups | Build seconds | Sorted by |",
+        "| Table | Dest | Rows | Parquet bytes | Row groups | Build seconds | Sorted by |",
         "|---|---|---:|---:|---:|---:|---|",
     ]
     for row in tables:
         lines.append(
-            f"| `{row['table']}` | {row['stage']} | {row['rows']:,} | {row['bytes']:,} | "
+            f"| `{row['table']}` | {row['dest']} | {row['rows']:,} | {row['bytes']:,} | "
             f"{row['row_groups']:,} | {row['seconds']:.1f} | `{row['order_by']}` |"
         )
 
@@ -492,11 +502,11 @@ def main() -> None:
     # Pass 1: the core layer, from CSV. Pass 2: the serving layer, from that Parquet —
     # so peer_stats reads sorted columnar data and only the columns it needs.
     use_csv_views(con)
-    tables = build(con, args.source, args.year, CORE_TABLES)
-    use_parquet_views(con, args.source, args.year, CORE_TABLES)
-    for table in SERVING_TABLES:
+    tables = build(con, args.source, args.year, PASS_1)
+    use_parquet_views(con, args.source, args.year, PASS_1)
+    for table in PASS_2:
         con.execute(build_sql(table))
-    tables += build(con, args.source, args.year, SERVING_TABLES)
+    tables += build(con, args.source, args.year, PASS_2)
 
     columns = column_footprint(con, args.source, args.year)
     checks, failures = run_checks(con, args.source, args.year)

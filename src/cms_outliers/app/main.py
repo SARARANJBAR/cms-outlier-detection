@@ -23,12 +23,18 @@ from cms_outliers.app import queries as q
 
 BREAKPOINTS = [10, 25, 50, 75, 90, 95, 99]
 
+# Part B splits every procedure by where it was performed, and the two are genuinely
+# different peer groups: for chest X-rays in radiology the 99th percentile is $7,168 in a
+# facility against $18,288 in an office. 1,997 (specialty, code) pairs have both, so the
+# picker has to offer them separately rather than collapse them by code.
+PLACE_OF_SERVICE = {"F": "facility", "O": "office"}
+
 SUPPRESSION = {
     "part_b": """
 **What is missing from this picture.** CMS removes any provider-procedure row covering
 fewer than 11 patients. It does not blank the value — it deletes the row. So the providers
 who do this procedure rarely are not shown as missing data; they are simply absent, and
-nothing in the file says so. The distribution below has had its bottom cut off, and a
+nothing in the file says so. The distribution here has had its bottom cut off, and a
 percentile is a rank against the providers who remained.
 """,
     "part_d": """
@@ -38,6 +44,50 @@ why those are the only measures scored here. Any per-patient figure would silent
 the larger half of the distribution while appearing to describe all of it.
 """,
 }
+
+LIMITS = (
+    "Being an outlier is not evidence of wrongdoing. High utilization can reflect a referral "
+    "practice, a sicker panel, or a sub-specialty this peer key does not separate. Peer groups "
+    "below 30 providers are not ranked at all. State filters the provider list, not the "
+    "comparison — state is deliberately not part of the peer key, because adding it would "
+    "leave 19.35% of Part B rows with too few peers to score."
+)
+
+NO_FACTS = """
+**Provider-level drill-down is not available here.** The distributions above come from
+`peer_stats`, a 3.3 MB table that ships in the repository. Placing an individual provider on
+one of them needs the fact tables — 941 MB of Parquet, a build artifact rather than a
+repository file — so the hosted version stops at the distribution.
+
+Clone the repo and run the build (see the README) and the same screen gains the provider
+picker and the ranked table. Publishing those tables as a downloadable asset is deliberately
+deferred work, not an oversight: the measurements in notebook 03 show remote reads are
+round-trip-bound, so it needs a latency budget rather than an upload.
+"""
+
+
+# Where a visitor lands. Alphabetical order opens on "Addiction Medicine", which is a real
+# peer group but a dull first impression; chest X-rays in radiology are a large group with a
+# dramatic tail, so the screen demonstrates itself before anyone touches a control. Falls back
+# to the first option if a future year does not contain these.
+LANDING = {
+    "part_b": {
+        "specialty": "Diagnostic Radiology",
+        "code": "71046",
+        "measure": "total_medicare_payment",
+    },
+    "part_d": {
+        "specialty": "Family Practice",
+        "code": "Atorvastatin Calcium",
+        "measure": "cost_per_claim",
+    },
+}
+
+
+def _index(options, wanted) -> int:
+    """Index of `wanted` in `options`, or 0 if it is not there."""
+    options = list(options)
+    return options.index(wanted) if wanted in options else 0
 
 
 @st.cache_resource
@@ -106,28 +156,49 @@ def main() -> None:
             list(q.DATASETS),
             format_func=lambda d: "Part B — procedures" if d == "part_b" else "Part D — drugs",
         )
-        specialty = st.selectbox("Specialty", cached("specialties", dataset))
+        landing = LANDING[dataset]
+        all_specialties = cached("specialties", dataset)
+        specialty = st.selectbox(
+            "Specialty", all_specialties, index=_index(all_specialties, landing["specialty"])
+        )
 
         code_options = cached("codes", dataset, specialty)
         if code_options.empty:
             st.warning("No peer group for this specialty reaches 30 providers.")
             return
-        code_labels = {
-            row.code: f"{row.code} — {(row.label or '?')[:40]} ({row.n_providers:,} peers)"
-            for row in code_options.itertuples()
-        }
-        code = st.selectbox(
-            q.DATASETS[dataset][2], list(code_labels), format_func=lambda c: code_labels[c]
+
+        # Keyed on the row, not the code: one code can be two peer groups.
+        def _code_label(i: int) -> str:
+            row = code_options.loc[i]
+            where = f" · {PLACE_OF_SERVICE.get(row.pos, row.pos)}" if row.pos else ""
+            return f"{row.code} — {(row.label or '?')[:38]}{where} ({row.n_providers:,} peers)"
+
+        landing_rows = code_options.index[code_options.code == landing["code"]]
+        code_row = st.selectbox(
+            q.DATASETS[dataset][2],
+            code_options.index.tolist(),
+            index=int(landing_rows[0]) if len(landing_rows) else 0,
+            format_func=_code_label,
         )
-        pos = code_options.loc[code_options.code == code, "pos"].iloc[0]
-        group = q.PeerGroup(dataset, specialty, code, pos if dataset == "part_b" else None)
+        chosen = code_options.loc[code_row]
+        group = q.PeerGroup(
+            dataset, specialty, chosen.code, chosen.pos if dataset == "part_b" else None
+        )
 
         measures = q.MEASURES[dataset]
-        measure = st.selectbox("Measure", list(measures), format_func=lambda m: measures[m][2])
+        measure = st.selectbox(
+            "Measure",
+            list(measures),
+            index=_index(measures, landing["measure"]),
+            format_func=lambda m: measures[m][2],
+        )
 
-        all_states = ["All states", *cached("states", group)]
-        state_choice = st.selectbox("State", all_states)
-        state = None if state_choice == "All states" else state_choice
+        facts = q.has_facts(get_connection())
+        state = None
+        if facts:
+            all_states = ["All states", *cached("states", group)]
+            state_choice = st.selectbox("State", all_states)
+            state = None if state_choice == "All states" else state_choice
 
     breaks = cached("distribution", group, measure)
     if breaks.empty:
@@ -135,7 +206,7 @@ def main() -> None:
             st.warning("This peer group has no published statistics for that measure.")
         return
 
-    top = cached("candidates", group, measure, state)
+    top = cached("candidates", group, measure, state) if facts else pd.DataFrame()
     measure_label = measures[measure][2]
 
     with controls:
@@ -168,11 +239,26 @@ def main() -> None:
 
         st.altair_chart(distribution_chart(breaks, marked, measure_label), use_container_width=True)
 
+        if not facts:
+            st.warning(NO_FACTS)
+
         st.subheader("Top of the peer group")
-        st.caption(
-            "Ranks are precomputed, so this is a filtered read rather than a percentile "
-            "computed on demand."
-        )
+        if not facts:
+            st.caption(
+                "Not available in the hosted version — see the note above. Running locally "
+                "after a build, this lists the providers at the top of the group with their "
+                "precomputed percentile."
+            )
+        else:
+            st.caption(
+                "Ranks are precomputed, so this is a filtered read rather than a percentile "
+                "computed on demand."
+            )
+        if top.empty:
+            st.info(SUPPRESSION[dataset])
+            st.caption(LIMITS)
+            return
+
         display = top.head(25).copy()
         display["provider"] = (
             display["provider"].str.title() + ", " + display["first_name"].str.title()
@@ -196,11 +282,7 @@ def main() -> None:
         )
 
         st.info(SUPPRESSION[dataset])
-        st.caption(
-            "Being an outlier is not evidence of wrongdoing. High utilization can reflect "
-            "a referral practice, a sicker panel, or a sub-specialty this peer key does not "
-            "separate. Peer groups below 30 providers are not ranked at all."
-        )
+        st.caption(LIMITS)
 
 
 def _provider_label(top: pd.DataFrame, npi: str) -> str:

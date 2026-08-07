@@ -1,13 +1,21 @@
 # CMS Outlier Detection
 
-A portfolio project built on public CMS (Centers for Medicare & Medicaid Services) data, aimed at healthcare and medtech-adjacent roles.
+**Which Medicare providers bill unlike everyone else doing the same thing?**
+
+Among the 20,166 radiologists who billed Medicare for a two-view chest X-ray in a facility in 2023, the median collected **$823**. One collected **$36,809** — 44.7x the median, at the 100th percentile of his peer group. Switch to the same procedure in an office setting and the 99th percentile more than doubles, from $7,168 to $18,288: where the X-ray was taken changes what "normal" means, so the two are scored as separate peer groups.
+
+This finds those providers, on all 36.5M rows of public CMS data for 2023, and is careful about what the ranking does and does not mean.
+
+![The app: a peer group's distribution with one provider marked on it](docs/img/screen.jpg)
+
+*Running locally with the full fact layer. The hosted version serves peer distributions from a 3.3 MB table committed to this repo; provider-level drill-down needs the 941 MB build artifact and is disabled there, with a note saying so.*
 
 ## What this is
 
-An exploration of Medicare provider-level data (Part B billing and Part D prescribing) to surface outliers — providers whose utilization, cost, or prescribing patterns differ significantly from their peers (same specialty, same geography). The project has two parts:
+A portfolio project built on public CMS (Centers for Medicare & Medicaid Services) data, aimed at healthcare and medtech-adjacent roles. It has two parts:
 
 1. **SQL / data engineering** — real multi-table joins (providers, claims, drug/procedure reference data, geography), window functions for peer-relative outlier scoring, and a documented query optimization case study: *interactive percentiles over 36M rows, served from free-tier hosting*. Two paths, measured separately — the **serving** path, where a precomputed peer-statistics table replaces a live percentile scan, and the **drill-down** path, where the app reads remote Parquet over HTTP range requests and sort order, zone-map pruning and projection pushdown decide how many bytes come down the wire.
-2. **Streamlit app** — one screen: pick a specialty and a procedure or drug, see the peer-group distribution with a chosen provider marked on it, filter by state, and read what CMS censored out of the picture. Built and running locally.
+2. **Streamlit app** — one screen: pick a specialty and a procedure or drug, see the peer-group distribution with a chosen provider marked on it, filter by state, and read what CMS censored out of the picture.
 
 ## Status
 
@@ -26,6 +34,26 @@ Three findings that shaped the design:
 - Peer groups are tiny — median 4 rows (Part B) and 5 (Part D). Requiring at least 30 peers before scoring a provider excludes 77.9% of Part B peer groups but only **2.40% of rows**, so statistical honesty is nearly free here.
 - The measures are heavy-tailed enough that mean and standard deviation are unusable: `mean/median` reaches 12.7 for Part D cost-per-claim. Scoring uses percentile rank instead.
 - The two datasets censor small counts differently. Part D blanks a column — `Tot_Benes` is null on **55.08%** of rows. Part B removes the row entirely, so its censoring produces no nulls at all and is invisible unless you go looking for it.
+
+## The thing worth knowing about this data
+
+Both datasets hide small counts to protect patient privacy, and they do it in opposite ways.
+
+**Part D blanks a column.** `Tot_Benes` is null on **55.08%** of rows — and not at random: it
+is systematically the small prescriber-drug pairs. So any per-beneficiary metric silently
+deletes the bottom half of the distribution while looking like it describes all of it. This
+project scores Part D on claims and cost only, for that reason.
+
+**Part B deletes the row.** Measured: `min(tot_benes)` is exactly 11 with zero rows below,
+and the low end runs 477,670 rows at 11, then 423,446, then 380,812 — monotonically
+decreasing. A natural distribution rises toward its low end; this one peaks at the threshold
+and stops, because it has been cut.
+
+The consequence is that **Part B's censoring is invisible.** It produces no nulls at all. A
+provider who performs a procedure eight times does not appear as missing data — they appear
+as a provider who does not perform it. Every Part B percentile in this project is therefore
+a rank against the providers who survived suppression, which the app states on screen rather
+than in a footnote.
 
 ## Project structure
 
@@ -59,6 +87,8 @@ tests/
 
 ## Running it
 
+The hosted version needs no setup. To run the full screen, including provider drill-down:
+
 ```bash
 uv sync
 uv run python -m cms_outliers.data.pull_full --dataset part_b --year 2023   # 2.9 GB
@@ -74,6 +104,10 @@ without downloading 6.5 GB, build against the committed 5k samples instead:
 ```bash
 uv run python -m cms_outliers.sql.build --year 2023 --source samples
 ```
+
+`streamlit_app.py` at the repository root exists for Streamlit Community Cloud, which runs
+from the root and installs with pip (`requirements.txt`) rather than uv. It is a three-line
+shim over `src/cms_outliers/app/main.py`, which is the real code.
 
 ## Data source
 

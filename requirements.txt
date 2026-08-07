@@ -1,0 +1,6 @@
+# For Streamlit Community Cloud, which installs with pip rather than uv.
+# Local development uses pyproject.toml + uv.lock; keep the two in step.
+streamlit>=1.40
+duckdb>=1.5.5
+pandas>=2.2
+altair>=5.4

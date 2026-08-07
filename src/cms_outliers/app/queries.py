@@ -63,23 +63,47 @@ class PeerGroup:
     place_of_service: str | None = None
 
 
+# Small enough to live in the repo, so the hosted app has them.
+SERVING_TABLES = ("peer_stats", "dim_hcpcs", "dim_drug")
+# The build artifact: absent on a clone until someone runs the build.
+CORE_TABLES = ("fact_part_b_service", "fact_part_d_drug", "dim_provider")
+
+
+def _exists(directory: Path, table: str) -> bool:
+    return any((directory / table).glob("**/*.parquet"))
+
+
 def connect() -> duckdb.DuckDBPyConnection:
-    """A connection with every table registered as a view over its Parquet."""
+    """Register a view for each table whose Parquet is actually present.
+
+    `peer_stats` ships in the repo, so it is always there. The fact and dimension tables are
+    a build artifact — 941 MB, gitignored, published separately — so on a fresh clone or a
+    hosted deploy they are simply absent. Registering views over missing files would make
+    every query fail at the point of use rather than once, here, so what is missing is
+    discovered up front and `has_facts()` lets the screen adapt.
+    """
     con = duckdb.connect()
-    for table, directory in [
-        ("fact_part_b_service", CORE_DIR),
-        ("fact_part_d_drug", CORE_DIR),
-        ("dim_provider", CORE_DIR),
-        ("dim_hcpcs", CORE_DIR),
-        ("dim_drug", CORE_DIR),
-        ("peer_stats", SERVING_DIR),
-    ]:
-        path = (directory / table / "**" / "*.parquet").as_posix()
+    for table in SERVING_TABLES:
+        path = (SERVING_DIR / table / "**" / "*.parquet").as_posix()
+        con.execute(
+            f"CREATE OR REPLACE VIEW {table} AS "
+            f"SELECT * FROM read_parquet('{path}', hive_partitioning = true)"
+        )
+    for table in CORE_TABLES:
+        if not _exists(CORE_DIR, table):
+            continue
+        path = (CORE_DIR / table / "**" / "*.parquet").as_posix()
         con.execute(
             f"CREATE OR REPLACE VIEW {table} AS "
             f"SELECT * FROM read_parquet('{path}', hive_partitioning = true)"
         )
     return con
+
+
+def has_facts(con) -> bool:
+    """Whether the fact layer is present, so provider-level drill-down is possible."""
+    registered = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+    return {"fact_part_b_service", "fact_part_d_drug", "dim_provider"} <= registered
 
 
 def specialties(con, dataset: str):
@@ -95,7 +119,28 @@ def specialties(con, dataset: str):
 
 
 def codes(con, dataset: str, specialty: str):
-    """Codes available for a specialty, largest peer group first, with a label."""
+    """Codes available for a specialty, largest peer group first, with a label.
+
+    The human-readable label lives in a dimension table, which is part of the fact layer and
+    so may be absent. Without it the code itself is the label — a HCPCS code is opaque and a
+    brand name is not, but neither case is worth failing over.
+    """
+    dim = "dim_hcpcs" if dataset == "part_b" else "dim_drug"
+    if not _exists(SERVING_DIR, dim):
+        return con.execute(
+            """
+            SELECT code,
+                   any_value(place_of_service) AS pos,
+                   code AS label,
+                   max(n_providers) AS n_providers
+            FROM peer_stats
+            WHERE dataset = ? AND specialty = ?
+            GROUP BY code
+            ORDER BY n_providers DESC
+            """,
+            [dataset, specialty],
+        ).df()
+
     label = "h.hcpcs_desc" if dataset == "part_b" else "string_agg(DISTINCT d.generic_name, ', ')"
     join = (
         "LEFT JOIN dim_hcpcs h ON h.hcpcs_code = p.code"
