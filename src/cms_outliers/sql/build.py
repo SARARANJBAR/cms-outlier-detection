@@ -45,23 +45,42 @@ SOURCES = {
     "full": (REPO_ROOT / "data" / "raw", "{dataset}_{year}_full.csv"),
     "samples": (REPO_ROOT / "data" / "samples", "{dataset}_{year}_sample.csv"),
 }
+# One directory per delivery mechanism: the "core" layer is too big for git and goes out
+# as a GitHub Release asset, while the "serving" layer ships inside the repo so Streamlit
+# Community Cloud gets it from the clone (ADR 0001, second amendment).
 OUT_DIRS = {
-    "full": REPO_ROOT / "data" / "parquet",
-    "samples": REPO_ROOT / "data" / "parquet-samples",
+    "full": {
+        "core": REPO_ROOT / "data" / "parquet",
+        "serving": REPO_ROOT / "data" / "serving",
+    },
+    "samples": {
+        "core": REPO_ROOT / "data" / "parquet-samples",
+        "serving": REPO_ROOT / "data" / "parquet-samples" / "serving",
+    },
 }
 REPORT_PATHS = {
     "full": REPO_ROOT / "docs" / "build_report.md",
-    "samples": OUT_DIRS["samples"] / "build_report.md",
+    "samples": OUT_DIRS["samples"]["core"] / "build_report.md",
 }
+
+# Minimum peer-group size before a provider is ranked at all. Substituted into the SQL so
+# the fact tables and peer_stats cannot drift apart on it.
+MIN_PEERS = 30
 
 
 @dataclass(frozen=True)
 class Table:
-    """A table to build. ``order_by`` is the physical sort order of the Parquet file."""
+    """A table to build. ``order_by`` is the physical sort order of the Parquet file.
+
+    ``stage`` is both where the output goes and where its input comes from. A "core" table
+    is built from the raw CSVs; a "serving" table is built from the core Parquet, which is
+    why the build runs in two passes.
+    """
 
     name: str
     sql_file: str
     order_by: str
+    stage: str = "core"
 
 
 @dataclass(frozen=True)
@@ -90,7 +109,15 @@ TABLES = (
         "specialty, hcpcs_code, place_of_service",
     ),
     Table("fact_part_d_drug", "21_fact_part_d_drug.sql", "specialty, brand_name"),
+    Table(
+        "peer_stats",
+        "30_peer_stats.sql",
+        "dataset, specialty, code, place_of_service, measure",
+        stage="serving",
+    ),
 )
+CORE_TABLES = tuple(t for t in TABLES if t.stage == "core")
+SERVING_TABLES = tuple(t for t in TABLES if t.stage == "serving")
 
 CHECKS = (
     Check(
@@ -121,6 +148,16 @@ CHECKS = (
         # unrecognised code fell through dim_geography's ELSE branch.
         expect_at_most={"geography_rows_labelled_state": 50},
     ),
+    Check(
+        "peer_stats",
+        "14_peer_stats.sql",
+        expect_zero=(
+            "part_b_group_mismatch",
+            "part_d_group_mismatch",
+            "groups_below_min_peers",
+            "non_monotonic_breakpoints",
+        ),
+    ),
 )
 
 # Lever 1 of the optimization writeup: the same peer-group query over CSV and over
@@ -143,13 +180,17 @@ TIMED = {
 
 
 def read_sql(*parts: str, **params: str) -> str:
-    """Read a .sql file, substituting $placeholders. Unknown ones raise, by design."""
+    """Read a .sql file, substituting $placeholders. Missing ones raise, by design."""
     text = SQL_DIR.joinpath(*parts).read_text()
     return Template(text).substitute(params) if params else text
 
 
-def parquet_path(source: str, table: str, year: int) -> Path:
-    return OUT_DIRS[source] / table / f"year={year}" / "data.parquet"
+def build_sql(table: Table) -> str:
+    return read_sql("build", table.sql_file, min_peers=str(MIN_PEERS))
+
+
+def parquet_path(source: str, table: Table, year: int) -> Path:
+    return OUT_DIRS[source][table.stage] / table.name / f"year={year}" / "data.parquet"
 
 
 def csv_path(source: str, dataset: str, year: int) -> Path:
@@ -174,25 +215,32 @@ def connect(source: str, year: int) -> duckdb.DuckDBPyConnection:
 
 
 def use_csv_views(con: duckdb.DuckDBPyConnection) -> None:
-    """Point every table name at the CSV-backed model."""
-    for table in TABLES:
-        con.execute(read_sql("build", table.sql_file))
+    """Point the core table names back at the CSV-backed model."""
+    for table in CORE_TABLES:
+        con.execute(build_sql(table))
 
 
-def use_parquet_views(con: duckdb.DuckDBPyConnection, source: str, year: int) -> None:
-    """Point every table name at the Parquet that was just written."""
-    for table in TABLES:
-        path = OUT_DIRS[source] / table.name / "**" / "*.parquet"
+def use_parquet_views(
+    con: duckdb.DuckDBPyConnection,
+    source: str,
+    year: int,
+    tables: tuple[Table, ...] = TABLES,
+) -> None:
+    """Point table names at the Parquet already written for them."""
+    for table in tables:
+        path = OUT_DIRS[source][table.stage] / table.name / "**" / "*.parquet"
         con.execute(
             f"CREATE OR REPLACE VIEW {table.name} AS "
             f"SELECT * FROM read_parquet('{path.as_posix()}', hive_partitioning = true)"
         )
 
 
-def build(con: duckdb.DuckDBPyConnection, source: str, year: int) -> list[dict]:
+def build(
+    con: duckdb.DuckDBPyConnection, source: str, year: int, tables: tuple[Table, ...]
+) -> list[dict]:
     results = []
-    for table in TABLES:
-        out = parquet_path(source, table.name, year)
+    for table in tables:
+        out = parquet_path(source, table, year)
         out.parent.mkdir(parents=True, exist_ok=True)
         print(f"building {table.name} -> {out.relative_to(REPO_ROOT)}")
 
@@ -217,6 +265,7 @@ def build(con: duckdb.DuckDBPyConnection, source: str, year: int) -> list[dict]:
                 "row_groups": row_groups,
                 "seconds": elapsed,
                 "order_by": table.order_by,
+                "stage": table.stage,
             }
         )
         print(f"  {rows:,} rows, {out.stat().st_size / 1e6:,.1f} MB, {elapsed:,.1f}s")
@@ -232,8 +281,8 @@ def column_footprint(con: duckdb.DuckDBPyConnection, source: str, year: int) -> 
     (lever 4) can only save what a column actually costs, so this is the ceiling on it.
     """
     results = []
-    for table in (t for t in TABLES if t.name.startswith("fact_")):
-        path = parquet_path(source, table.name, year)
+    for table in (t for t in TABLES if t.name.startswith("fact_") or t.stage == "serving"):
+        path = parquet_path(source, table, year)
         rows = con.execute(
             "SELECT path_in_schema AS column_name, sum(total_compressed_size) AS bytes "
             f"FROM parquet_metadata('{path.as_posix()}') "
@@ -289,7 +338,8 @@ def run_checks(
 def measure_lever_1(con: duckdb.DuckDBPyConnection, source: str, year: int) -> list[dict]:
     """Time one peer-group query against CSV and against Parquet. Warm cache, both."""
     results = []
-    for table, (pick_sql, query_sql) in TIMED.items():
+    for table_name, (pick_sql, query_sql) in TIMED.items():
+        table = next(t for t in TABLES if t.name == table_name)
         use_parquet_views(con, source, year)
         keys = con.execute(pick_sql).fetchone()
 
@@ -304,10 +354,10 @@ def measure_lever_1(con: duckdb.DuckDBPyConnection, source: str, year: int) -> l
         csv_seconds = timed(query_sql, keys)
         use_parquet_views(con, source, year)
 
-        dataset = "part_b" if "part_b" in table else "part_d"
+        dataset = "part_b" if "part_b" in table.name else "part_d"
         results.append(
             {
-                "table": table,
+                "table": table.name,
                 "peer_group": " / ".join(str(k) for k in keys),
                 "csv_bytes": csv_path(source, dataset, year).stat().st_size,
                 "parquet_bytes": parquet_path(source, table, year).stat().st_size,
@@ -315,7 +365,7 @@ def measure_lever_1(con: duckdb.DuckDBPyConnection, source: str, year: int) -> l
                 "parquet_seconds": parquet_seconds,
             }
         )
-        print(f"lever 1 {table}: CSV {csv_seconds:.3f}s vs Parquet {parquet_seconds:.3f}s")
+        print(f"lever 1 {table.name}: CSV {csv_seconds:.3f}s vs Parquet {parquet_seconds:.3f}s")
     return results
 
 
@@ -343,12 +393,14 @@ def write_report(
         "",
         "## Artifacts",
         "",
-        "| Table | Rows | Parquet bytes | Row groups | Build seconds | Sorted by |",
-        "|---|---:|---:|---:|---:|---|",
+        "`core` tables go out as a Release asset; `serving` ships in the repo.",
+        "",
+        "| Table | Stage | Rows | Parquet bytes | Row groups | Build seconds | Sorted by |",
+        "|---|---|---:|---:|---:|---:|---|",
     ]
     for row in tables:
         lines.append(
-            f"| `{row['table']}` | {row['rows']:,} | {row['bytes']:,} | "
+            f"| `{row['table']}` | {row['stage']} | {row['rows']:,} | {row['bytes']:,} | "
             f"{row['row_groups']:,} | {row['seconds']:.1f} | `{row['order_by']}` |"
         )
 
@@ -428,8 +480,15 @@ def main() -> None:
     con = connect(args.source, args.year)
     threads = con.execute("SELECT current_setting('threads')").fetchone()[0]
 
+    # Pass 1: the core layer, from CSV. Pass 2: the serving layer, from that Parquet —
+    # so peer_stats reads sorted columnar data and only the columns it needs.
     use_csv_views(con)
-    tables = build(con, args.source, args.year)
+    tables = build(con, args.source, args.year, CORE_TABLES)
+    use_parquet_views(con, args.source, args.year, CORE_TABLES)
+    for table in SERVING_TABLES:
+        con.execute(build_sql(table))
+    tables += build(con, args.source, args.year, SERVING_TABLES)
+
     columns = column_footprint(con, args.source, args.year)
     checks, failures = run_checks(con, args.source, args.year)
     levers = measure_lever_1(con, args.source, args.year)

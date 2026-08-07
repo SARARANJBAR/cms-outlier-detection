@@ -197,6 +197,32 @@ build regenerates; the four that change what this ADR says:
   put in a git repo and not the first choice, but the fallback is known to be available
   without designing a reduced table for it.
 
+- **`peer_stats` is 3.3 MB, and the serving path is real.** 94,727 rows — 27,529 qualifying
+  peer groups across four Part B measures and three Part D ones — against the "on the order
+  of 10⁵ rows and a few MB" estimate above. It ships in the repo at `data/serving/`, so the
+  app answers its main question from 3.3 MB and never opens a fact table to draw a
+  distribution. That is lever 6, and it is now an artifact rather than a plan.
+
+- **The precomputed ranks cost a third of the fact files, and ties are why.** Each fact row
+  carries its percentile rank within its peer group, so the drill-down path is a lookup too.
+  Those columns are 30% of `fact_part_b_service` (which grew 247.5 → 352.2 MB) and 36% of
+  `fact_part_d_drug` (503.3 → 794.0 MB), and the spread between them is the interesting
+  part: `tot_claims_pct` is 43 MB while `cost_per_claim_pct` is 128 MB, off the same 26.8M
+  rows. Claims are small integers with many ties, so `cume_dist()` returns few distinct
+  values per group and the column encodes well; cost is continuous, so nearly every row gets
+  its own value. The core layer is now 1.12 GB, still inside a Release asset's 2 GB but with
+  a third of the headroom spent. Rounding the ranks to display precision would recover most
+  of it and is worth measuring before publishing — noted, not done.
+
+- **A number in the 2026-08-06 amendment above was wrong.** It said the brand peer key
+  "leaves coverage essentially unchanged" against the generic key. Measured on the built
+  facts: the generic key costs 0.71% of Part D rows and the brand key 0.91% — 53,018 more
+  rows unscoreable, a 28% relative increase on a small base. The decision does not change,
+  because the spread argument that motivated it (p90 of `p99/p50`, 9.74 → 5.86) is the far
+  larger effect, but "essentially unchanged" was not what the data said.
+  `sql/checks/14_peer_stats.sql` now recomputes both figures on every build so the trade
+  stays a measurement.
+
 ## Open questions
 
 - **Cold latency over HTTP.** Remote Parquet reads have not been exercised at all. If

@@ -11,6 +11,18 @@
 -- and cost. The column is carried anyway so the app can say what is missing.
 --
 -- No year column: year is the Hive partition key and lives in the directory path.
+--
+-- The *_pct columns are the row's percentile rank within its peer group
+-- (specialty, brand_name) — see 20_fact_part_b_service.sql for what cume_dist() means
+-- here and why the rank is NULL below $min_peers peers.
+--
+-- Note that the peer group is coarser than the grain: the grain includes generic_name, so
+-- a prescriber with two generics under one brand contributes two rows to the same peer
+-- group. That is why peer_stats reports n_providers and n_rows separately.
+--
+-- The measures are claims and cost, never anything per beneficiary. tot_benes is blank on
+-- 55.08% of rows and not at random, so a per-beneficiary rank would be a rank against
+-- whichever peers happened to survive suppression.
 
 CREATE OR REPLACE VIEW fact_part_d_drug AS
 SELECT
@@ -31,5 +43,15 @@ SELECT
     GE65_Tot_Day_Suply          AS ge65_tot_day_supply,
     GE65_Tot_Drug_Cst           AS ge65_tot_drug_cost,
     GE65_Bene_Sprsn_Flag        AS ge65_bene_suppression_flag,
-    GE65_Tot_Benes              AS ge65_tot_benes
-FROM raw_part_d;
+    GE65_Tot_Benes              AS ge65_tot_benes,
+    CASE WHEN count(*) OVER peer >= $min_peers
+         THEN cume_dist() OVER (peer ORDER BY Tot_Clms)
+    END                         AS tot_claims_pct,
+    CASE WHEN count(*) OVER peer >= $min_peers
+         THEN cume_dist() OVER (peer ORDER BY Tot_Drug_Cst)
+    END                         AS tot_drug_cost_pct,
+    CASE WHEN count(*) OVER peer >= $min_peers
+         THEN cume_dist() OVER (peer ORDER BY Tot_Drug_Cst / Tot_Clms)
+    END                         AS cost_per_claim_pct
+FROM raw_part_d
+WINDOW peer AS (PARTITION BY Prscrbr_Type, Brnd_Name);

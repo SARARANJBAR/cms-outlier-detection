@@ -128,11 +128,14 @@ rather than assumed, along with whether any single NPI carries more than one nam
 | `avg_medicare_allowed` | DOUBLE | What Medicare allows |
 | `avg_medicare_payment` | DOUBLE | What Medicare actually paid |
 | `avg_medicare_standardized` | DOUBLE | Payment with geographic cost adjustment removed — the column for cross-region comparison |
+| `tot_srvcs_pct`, `tot_benes_pct`, `avg_medicare_standardized_pct`, `total_medicare_payment_pct` | DOUBLE | Precomputed percentile rank within the peer group — see below. NULL when the group has fewer than 30 rows |
 | `year` | BIGINT | Partition key. Not stored in the file — the Hive directory `year=2023/` carries it, which is the convention and stops the column existing twice on read. DuckDB infers it as BIGINT from the path |
 
 The `avg_*` columns are **per-service averages, not totals**. Total Medicare payment for
 a row is `tot_srvcs * avg_medicare_payment` — there is no total column. This distinction
 decides what an outlier is: a provider can be ordinary on price and extreme on volume.
+`total_medicare_payment_pct` exists precisely because that product is where the volume
+outlier shows up, and a rank is the one thing the app cannot compute from a single row.
 
 ## `fact_part_d_drug`
 
@@ -152,6 +155,7 @@ decides what an outlier is: a provider can be ordinary on price and extreme on v
 | `tot_drug_cost` | DOUBLE | Never null. Already a total, unlike Part B |
 | `tot_benes` | BIGINT | **Null on 55.08% of rows** — see suppression below |
 | `ge65_*` | various | The 65+ breakdown and its suppression flags |
+| `tot_claims_pct`, `tot_drug_cost_pct`, `cost_per_claim_pct` | DOUBLE | Precomputed percentile rank within the peer group. No per-beneficiary measure is ranked, because `tot_benes` is suppressed on 55.08% of rows |
 | `year` | BIGINT | Partition key — carried by the Hive directory, not stored in the file |
 
 ## Reference dimensions
@@ -180,19 +184,43 @@ for both datasets.
 | `specialty` | VARCHAR | |
 | `code` | VARCHAR | HCPCS code, or brand name for Part D |
 | `place_of_service` | VARCHAR | Part B only; null for Part D |
-| `measure` | VARCHAR | e.g. `tot_srvcs`, `avg_medicare_standardized`, `cost_per_claim` |
-| `n_providers` | BIGINT | Peer group size |
+| `measure` | VARCHAR | Part B: `tot_srvcs`, `tot_benes`, `avg_medicare_standardized`, `total_medicare_payment`. Part D: `tot_claims`, `tot_drug_cost`, `cost_per_claim` |
+| `n_providers` | BIGINT | Distinct NPIs in the group |
+| `n_rows` | BIGINT | Rows the breakpoints were computed over. Differs from `n_providers` only in Part D — see below |
 | `p10`…`p99` | DOUBLE | Breakpoints: 10, 25, 50, 75, 90, 95, 99. `p50` is the median |
-| `year` | INTEGER | |
+| `year` | BIGINT | Partition key — carried by the Hive directory |
 
-**Only groups with `n_providers >= 30` are written.** Measured cost of that rule: it
-excludes 77.9% of Part B peer groups but only **1.95% of rows**, and 73.2% / **0.71%**
-for Part D. Refusing to rank a provider against a handful of peers is nearly free here,
-so we do it rather than publishing a rank that means nothing.
+**The measure names are a contract with the fact tables.** Measure `tot_srvcs` here is
+`fact_part_b_service.tot_srvcs_pct` there: this table holds the distribution, that column
+holds one provider's position in it, and the app's whole screen is those two things drawn
+together. They are computed by different SQL over different artifacts, so
+[`sql/checks/14_peer_stats.sql`](../sql/checks/14_peer_stats.sql) asserts they agree on
+exactly which groups are scoreable — otherwise a provider could be marked on a distribution
+that was never built, silently.
 
-Size of this table is unknown until it is built. Measure it — this is the artifact that
-**ships inside the repo** and answers the app's main query, while the fact tables are
-published as a Release asset and read remotely (ADR 0001, second amendment).
+**The rank is `cume_dist()`** — the empirical CDF, "this fraction of peers is at or below
+you." That is the number a user can read off a sentence, and it is the exact inverse of the
+interpolated breakpoints stored here. `percent_rank()` would have been the more familiar
+function name and assigns 0 to the group minimum, which reads worse and buys nothing.
+
+**Only groups with `n_rows >= 30` are written**, and the matching fact-table `*_pct`
+columns are NULL below that threshold, so the policy holds wherever the data goes rather
+than only in whichever query remembers to filter. Measured cost: it excludes 77.9% of
+Part B peer groups but only **2.40% of rows** at the full peer key, and 73.2% of Part D
+groups / **0.91% of rows**. Refusing to rank a provider against a handful of peers is
+nearly free here.
+
+**Why `n_providers` and `n_rows` are both stored.** In Part D the grain includes
+`generic_name` but the peer key does not, so a prescriber with two generics under one brand
+contributes two rows to the same peer group. The threshold and the percentiles are on rows,
+because that is what the coverage figures above were measured on; `n_providers` is carried
+so the difference is visible instead of implied. Part B's peer key is a superset of its
+grain, so the two are always equal there.
+
+This is the artifact that **ships inside the repo**, at `data/serving/`, while the fact
+tables go to the gitignored `data/parquet/` and out as a Release asset (ADR 0001, second
+amendment). One directory per delivery mechanism. Size in
+[`build_report.md`](build_report.md).
 
 ## Peer keys
 
@@ -201,7 +229,7 @@ The comparison set an outlier is scored against.
 | Dataset | Peer key | Why |
 |---|---|---|
 | Part B | `(specialty, hcpcs_code, place_of_service)` | Place of service is part of the natural grain and costs almost nothing: 1.95% → 2.40% of rows unscoreable |
-| Part D | `(specialty, brand_name)` | Coverage is unchanged vs. the generic key, but within-group cost spread tightens where it matters: p90 of `p99/p50` falls 9.74 → 5.86, max 409.43 → 172.50 |
+| Part D | `(specialty, brand_name)` | Costs 0.91% of rows against the generic key's 0.71% — 53,018 more rows unscoreable — and buys a much tighter within-group cost spread: p90 of `p99/p50` falls 9.74 → 5.86, max 409.43 → 172.50. The build recomputes both figures every run |
 
 **State is not in the peer key.** Adding it makes 19.35% of Part B rows unscoreable,
 against 1.95% for the base key — a tenth of the dataset, to buy a comparison that
@@ -278,9 +306,39 @@ uv run python -m cms_outliers.sql.build --year 2023
 uv run python -m cms_outliers.sql.build --year 2023 --source samples   # 5k-row fixture
 ```
 
-Output is one Parquet file per table per year at `data/parquet/<table>/year=2023/`. Types
-are declared rather than sniffed, which makes them assertions: DuckDB's own detection over
-all 36M rows reads NPI as BIGINT and RUCA as DOUBLE, and both would be quietly wrong here.
+It runs in **two passes**, because the two stages have different inputs and different
+destinations:
+
+1. The facts and dimensions, from the raw CSVs, to `data/parquet/<table>/year=2023/` —
+   gitignored, published as a GitHub Release asset.
+2. `peer_stats`, from the Parquet pass 1 just wrote, to `data/serving/` — committed, so a
+   Streamlit deploy gets it from the clone. Reading the sorted columnar facts instead of the
+   CSVs means this pass touches only the columns it aggregates.
+
+Types are declared rather than sniffed, which makes them assertions: DuckDB's own detection
+over all 36M rows reads NPI as BIGINT and RUCA as DOUBLE, and both would be quietly wrong
+here.
+
+## What the precomputed ranks cost
+
+Storing each row's peer rank is what makes the drill-down path a lookup instead of a scan.
+Measured, those columns are **30% of `fact_part_b_service` and 36% of `fact_part_d_drug`**,
+and the spread between individual columns is the part worth knowing:
+
+| Column | Bytes | Share of file |
+|---|---:|---:|
+| `fact_part_d_drug.cost_per_claim_pct` | 128,158,239 | 15.7% |
+| `fact_part_d_drug.tot_claims_pct` | 43,164,232 | 5.3% |
+
+Same 26.8M rows, same function, three times the bytes. Claims are small integers with many
+ties, so `cume_dist()` returns few distinct values per group and the column encodes into
+almost nothing; cost is continuous, so nearly every row gets a distinct rank. **How
+compressible a precomputed rank is depends on how many ties the underlying measure has** —
+which is not obvious until you look.
+
+Consequence worth flagging: the ranks are displayed at two decimal places, so full DOUBLE
+precision is storing detail no one reads. Rounding them would recover most of this and is
+worth measuring before the Release asset is published (ADR 0001, third amendment).
 
 ## Resolved by the build
 
@@ -291,9 +349,15 @@ all 36M rows reads NPI as BIGINT and RUCA as DOUBLE, and both would be quietly w
   across the 706,614 shared NPIs, on exact string equality — normalizing case and
   whitespace changes nothing. No NPI carries more than one name or city within a dataset
   either, so `dim_provider` collapsing the fact rows loses nothing.
-- **Fact-table sizes**: 247.5 MB (Part B) and 503.3 MB (Part D), from 6.5 GB of CSV.
+- **The two artifacts agree on who is scoreable.** The fact tables' non-null `*_pct` groups
+  and `peer_stats`' rows match exactly, on both datasets, so the app cannot mark a provider
+  on a distribution that was never built.
+- **Sizes**: 352.2 MB (Part B) and 794.0 MB (Part D) with ranks included, from 6.5 GB of
+  CSV, plus a 3.3 MB `peer_stats`.
+- **The brand peer key costs more than the ADR first said** — 0.91% of Part D rows against
+  the generic key's 0.71%, not "essentially unchanged." Recomputed every build.
 
 ## Open
 
-- Measured size of `peer_stats`, which does not exist yet, and bytes read per drill-down
-  query against the remote Parquet — see ADR 0001.
+- Bytes read per drill-down query against the remote Parquet, and whether rounding the rank
+  columns is worth it — see ADR 0001.

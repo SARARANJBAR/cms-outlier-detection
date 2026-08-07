@@ -11,7 +11,7 @@ An exploration of Medicare provider-level data (Part B billing and Part D prescr
 
 ## Status
 
-Full 2023 data pulled locally (9,660,647 rows / 2.9 GB for Part B, 26,794,878 rows / 3.6 GB for Part D) and explored end to end. Engine and storage format decided, schema designed, and the Parquet layer now builds from the raw CSV with its integrity checks passing: 36.5M fact rows in 751 MB of Parquet, down from 6.5 GB of CSV. Next: the precomputed `peer_stats` serving table.
+Full 2023 data pulled locally (9,660,647 rows / 2.9 GB for Part B, 26,794,878 rows / 3.6 GB for Part D) and explored end to end. Engine and storage format decided, schema designed, and the whole model now builds from the raw CSV with its integrity checks passing: 36.5M fact rows carrying precomputed peer ranks in 1.12 GB of Parquet, plus a 3.3 MB peer-statistics table that ships in the repo and answers the app's main query without touching the facts. Next: the optimization notebook.
 
 Decisions and findings so far:
 
@@ -22,7 +22,7 @@ Decisions and findings so far:
 
 Three findings that shaped the design:
 
-- Peer groups are tiny — median 4 rows (Part B) and 5 (Part D). Requiring at least 30 peers before scoring a provider excludes 77.9% of Part B peer groups but only **1.95% of rows**, so statistical honesty is nearly free here.
+- Peer groups are tiny — median 4 rows (Part B) and 5 (Part D). Requiring at least 30 peers before scoring a provider excludes 77.9% of Part B peer groups but only **2.40% of rows**, so statistical honesty is nearly free here.
 - The measures are heavy-tailed enough that mean and standard deviation are unusable: `mean/median` reaches 12.7 for Part D cost-per-claim. Scoring uses percentile rank instead.
 - The two datasets censor small counts differently. Part D blanks a column — `Tot_Benes` is null on **55.08%** of rows. Part B removes the row entirely, so its censoring produces no nulls at all and is invisible unless you go looking for it.
 
@@ -45,7 +45,8 @@ sql/
 data/
   raw/                       full bulk downloads — gitignored; re-pull with pull_full.py
   samples/                   small committed samples for exploration/dev
-  parquet/                   the built Parquet layer — gitignored; rebuild with sql.build
+  parquet/                   built fact + dimension layer — gitignored, goes out as a Release asset
+  serving/                   built peer_stats — committed, this is what the app reads
 notebooks/
   01_explore_samples.ipynb   columns, cardinality and quirks, on the 5k samples
   02_distributions.ipynb     distributions, peer-group sizes and data quality, full data
