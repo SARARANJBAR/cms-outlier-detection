@@ -11,7 +11,7 @@ We're using two provider-level datasets:
 | Dataset | What it is | Grain |
 |---|---|---|
 | Medicare Physician & Other Practitioners – by Provider and Service | Part B billing: procedures/services performed by providers | one row per (provider NPI, HCPCS procedure code, place of service), per year |
-| Medicare Part D Prescribers – by Provider and Drug | Part D prescribing: drugs prescribed by providers | one row per (provider NPI, drug), per year |
+| Medicare Part D Prescribers – by Provider and Drug | Part D prescribing: drugs prescribed by providers | one row per (provider NPI, brand name, generic name), per year |
 
 ## Data Structure on CMS's side
 
@@ -80,7 +80,7 @@ These are local-only (gitignored) — anyone reproducing this needs to re-run `p
 | `Avg_Mdcr_Pymt_Amt` | What Medicare actually paid |
 | `Avg_Mdcr_Stdzd_Amt` | Payment standardized to remove geographic cost-of-living adjustments — for fair cross-region comparison |
 
-**Part D** — one row per (prescriber, drug)
+**Part D** — one row per (prescriber NPI, brand name, generic name)
 
 | Column(s) | Meaning |
 |---|---|

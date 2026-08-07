@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from cms-outliers!")
+"""CMS provider outlier detection: data pipeline, SQL, and Streamlit app."""

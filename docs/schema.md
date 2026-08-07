@@ -120,7 +120,7 @@ decides what an outlier is: a provider can be ordinary on price and extreme on v
 
 ## `fact_part_d_drug`
 
-**26,794,878 rows** for 2023. Grain: one row per (prescriber, drug).
+**26,794,878 rows** for 2023. Grain: one row per (`npi`, `brand_name`, `generic_name`).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -143,7 +143,7 @@ decides what an outlier is: a provider can be ordinary on price and extreme on v
 | Table | Rows | Contents |
 |---|---|---|
 | `dim_hcpcs` | 6,405 | Code, description, drug indicator |
-| `dim_drug` | ~3,027 brands / 1,779 generics | Brand → generic mapping. 63.8% of generics have exactly one brand; the rest average 1.77 and run to 50 |
+| `dim_drug` | 3,027 brands / 1,779 generics | Brand → generic mapping. 63.8% of generics have exactly one brand; the rest average 1.77 and run to 50 |
 | `dim_geography` | 62 | State abbreviation, FIPS, and a flag for the 12 values that are not US states — territories, military codes, foreign |
 | `dim_ruca` | 22 | RUCA code and description |
 
@@ -164,8 +164,7 @@ for both datasets.
 | `place_of_service` | VARCHAR | Part B only; null for Part D |
 | `measure` | VARCHAR | e.g. `tot_srvcs`, `avg_medicare_standardized`, `cost_per_claim` |
 | `n_providers` | BIGINT | Peer group size |
-| `p10`…`p99` | DOUBLE | Breakpoints: 10, 25, 50, 75, 90, 95, 99 |
-| `median`, `mad` | DOUBLE | Median and median absolute deviation — the robust scale estimate |
+| `p10`…`p99` | DOUBLE | Breakpoints: 10, 25, 50, 75, 90, 95, 99. `p50` is the median |
 | `year` | INTEGER | |
 
 **Only groups with `n_providers >= 30` are written.** Measured cost of that rule: it
@@ -173,8 +172,9 @@ excludes 77.9% of Part B peer groups but only **1.95% of rows**, and 73.2% / **0
 for Part D. Refusing to rank a provider against a handful of peers is nearly free here,
 so we do it rather than publishing a rank that means nothing.
 
-Size of this table is unknown until it is built. Measure it — it is the artifact that has
-to fit inside the hosting limit flagged as open in ADR 0001.
+Size of this table is unknown until it is built. Measure it — this is the artifact that
+**ships inside the repo** and answers the app's main query, while the fact tables are
+published as a Release asset and read remotely (ADR 0001, second amendment).
 
 ## Peer keys
 
@@ -227,8 +227,18 @@ Recorded here because they constrain what `peer_stats` needs to hold.
 **Mean and standard deviation are unusable.** `mean/median` is 6.4 for Part B `tot_srvcs`
 and 12.4 / 12.7 for Part D drug cost and cost-per-claim. The extremes are genuine — one
 Part B row carries $299M in total payment, one Part D row $81.8M in drug cost. A z-score
-would measure the tail against itself. Use **rank/percentile, or median and MAD**, which
-is why `peer_stats` stores breakpoints and MAD rather than mean and standard deviation.
+would measure the tail against itself. Scoring is **percentile rank**, which is why
+`peer_stats` stores breakpoints rather than mean and standard deviation.
+
+**Median and MAD were considered and dropped.** A modified z-score,
+`0.6745 · (x − median) / MAD`, is the usual robust alternative, and the notebook's first
+reading proposed it alongside percentile rank. It does not survive a measured fact from
+the same notebook: within the 25 largest Part B peer groups, `p99/p50` on standardized
+payment is 1.00–1.23, because Medicare fixes the rate. In groups that tight, MAD is zero
+or near it and the score is undefined or explosive — precisely on the measure where a
+user is most likely to ask. Percentile rank is already robust to the heavy tail, needs no
+zero-MAD special case, and is the number the dashboard actually displays. One scoring
+method, not two.
 
 **In Part B the signal is utilization, not price.** Within the 25 largest peer groups,
 `p99/p50` on standardized payment is 1.00–1.23 — Medicare sets the rate — while the same
@@ -239,9 +249,9 @@ Radiology / 71046 (chest X-ray) sits at 3.34 against ~1.1 for everything around 
 
 ## Open
 
-- Whether the fact-table grains are actually unique — (npi, hcpcs, place of service) and
-  (npi, brand, generic) — is documented by CMS but unverified. The build script must
-  assert it rather than assume.
+- Whether the fact-table grains are actually unique — (`npi`, `hcpcs_code`,
+  `place_of_service`) and (`npi`, `brand_name`, `generic_name`) — is documented by CMS
+  but unverified. The build script must assert it rather than assume.
 - Whether provider name and city agree across datasets for the 706,614 shared NPIs.
-- Measured size of `peer_stats` and of the Parquet build, against the hosting limit in
-  ADR 0001.
+- Measured size of `peer_stats` (ships in-repo) and of the fact-table Parquet (published
+  as a Release asset), plus bytes read per drill-down query — see ADR 0001.

@@ -13,9 +13,6 @@ dependencies = [
     "duckdb>=1.5.5",
 ]
 
-[project.scripts]
-cms-outliers = "cms_outliers:main"
-
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
 build-backend = "uv_build"
@@ -24,4 +21,15 @@ build-backend = "uv_build"
 dev = [
     "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
+    "ruff>=0.16.1",
 ]
+
+[tool.ruff]
+line-length = 100
+# Notebooks are exploration records: their SQL is column-aligned for reading, and their
+# outputs are committed measurements (project rule 7). Reformatting them would churn
+# those outputs for no benefit, so lint covers shipped code only.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

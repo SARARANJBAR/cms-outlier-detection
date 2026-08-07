@@ -29,6 +29,11 @@ def _find_distribution(catalog: list[dict], dataset: str, year: int, fmt: str) -
     matches = [item for item in catalog if item.get("title") == title]
     if not matches:
         raise ValueError(f"No catalog entry found with title {title!r}")
+    if len(matches) > 1:
+        raise ValueError(
+            f"Expected exactly one catalog entry titled {title!r}, found {len(matches)}. "
+            "CMS may have republished under a duplicate title — pick deliberately."
+        )
 
     year_start = f"{year}-01-01"
     for distribution in matches[0]["distribution"]:

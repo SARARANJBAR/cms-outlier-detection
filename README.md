@@ -6,8 +6,8 @@ A portfolio project built on public CMS (Centers for Medicare & Medicaid Service
 
 An exploration of Medicare provider-level data (Part B billing and Part D prescribing) to surface outliers — providers whose utilization, cost, or prescribing patterns differ significantly from their peers (same specialty, same geography). The project has two parts:
 
-1. **SQL / data engineering** — real multi-table joins (providers, claims, drug/procedure reference data, geography), window functions for peer-relative outlier scoring, and a documented query optimization case study: *how to get interactive latency on 36M rows*, with each step measured — file layout and sort order, zone-map and partition pruning, projection pushdown, and a precomputed peer-statistics table.
-2. **Streamlit app** — an interactive dashboard where a user picks a specialty and procedure/drug and sees where a given provider, state, or peer group sits in the distribution, with geographic and year-over-year views.
+1. **SQL / data engineering** — real multi-table joins (providers, claims, drug/procedure reference data, geography), window functions for peer-relative outlier scoring, and a documented query optimization case study: *interactive percentiles over 36M rows, served from free-tier hosting*. Two paths, measured separately — the **serving** path, where a precomputed peer-statistics table replaces a live percentile scan, and the **drill-down** path, where the app reads remote Parquet over HTTP range requests and sort order, zone-map pruning and projection pushdown decide how many bytes come down the wire.
+2. **Streamlit app** — one screen: pick a specialty and a procedure or drug, see the peer-group distribution with a chosen provider marked on it, filter by state, and read what CMS censored out of the picture.
 
 ## Status
 
@@ -22,7 +22,7 @@ Decisions and findings so far:
 Three findings that shaped the design:
 
 - Peer groups are tiny — median 4 rows (Part B) and 5 (Part D). Requiring at least 30 peers before scoring a provider excludes 77.9% of Part B peer groups but only **1.95% of rows**, so statistical honesty is nearly free here.
-- The measures are heavy-tailed enough that mean and standard deviation are unusable: `mean/median` reaches 12.7 for Part D cost-per-claim. Scoring uses percentile rank and median/MAD instead.
+- The measures are heavy-tailed enough that mean and standard deviation are unusable: `mean/median` reaches 12.7 for Part D cost-per-claim. Scoring uses percentile rank instead.
 - The two datasets censor small counts differently. Part D blanks a column — `Tot_Benes` is null on **55.08%** of rows. Part B removes the row entirely, so its censoring produces no nulls at all and is invisible unless you go looking for it.
 
 ## Project structure
@@ -32,11 +32,12 @@ pyproject.toml, uv.lock      Python project managed with uv
 docs/
   adr/                       architecture decision records
   schema.md                  data model: tables, keys, peer groups, suppression rules
+  optimization.md            (planned) the query optimization writeup
 src/cms_outliers/
   data/                      dataset catalog lookup + sample and full pull scripts
   sql/                       (planned) Parquet build + query runners
   app/                       (planned) Streamlit app
-sql/                         raw .sql files + the optimization writeup (not Python)
+sql/                         raw .sql files used by the build and the app
 data/
   raw/                       full bulk downloads — gitignored; re-pull with pull_full.py
   samples/                   small committed samples for exploration/dev

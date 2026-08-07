@@ -86,8 +86,11 @@ project does not otherwise use is not evidence of anything.
 - The optimization writeup is framed as *"how I got interactive latency on 36M rows,"*
   with each step measured — not as a manufactured slow-query-then-fix narrative. Levers
   to measure: CSV → typed Parquet + ZSTD; sort order and zone-map pruning; Hive
-  partitioning by year; projection pushdown; larger-than-memory behavior; live
-  percentile computation vs. the precomputed peer-stat table.
+  partitioning by year; projection pushdown; live percentile computation vs. the
+  precomputed peer-stat table.
+- Scope is **one year (2023)**. Partitioning by year is still the right layout — it is
+  how CMS publishes the data and it costs nothing — but with a single partition loaded,
+  nothing here measures multi-year behavior, and no claim is made about it.
 - Partition and sort keys are a schema-design decision that depends on measured
   cardinality per specialty and per procedure/drug code. Deferred until the
   distribution exploration is done.
@@ -123,7 +126,9 @@ edited into the text above, so the record of what we believed when we decided su
 
 - **Partition and sort keys are no longer deferred.** Partition by year only; nothing in
   the measured cardinality argues for a second level. Peer key measured at
-  `(specialty, code, place_of_service)` for Part B and `(specialty, generic)` for Part D:
+  `(specialty, code, place_of_service)` for Part B and `(specialty, brand_name)` for
+  Part D (notebook section 9b — brand rather than generic, because it leaves coverage
+  essentially unchanged while halving the p90 within-group cost spread, 9.74 → 5.86):
   adding state would make 19.35% of Part B rows unscoreable at a minimum peer-group size
   of 30, against 1.95% for the base key, while RUCA costs 4.84% and captures the
   urban/rural density that plausibly drives utilization. State is a filter dimension,
@@ -134,14 +139,41 @@ edited into the text above, so the record of what we believed when we decided su
   carries more than one specialty within a dataset, and specialty strings agree across
   datasets for 100% of the overlap. No crosswalk is required.
 
+### 2026-08-06 — how the artifacts are delivered, and what the writeup claims
+
+Two things this ADR left open turned out to be settled by arithmetic rather than by
+measurement, and settling them changes what the optimization writeup is about.
+
+- **The fact tables were never going to ship in the repo.** `peer_stats` is on the order
+  of 10⁵ rows — roughly 25k qualifying peer groups times a handful of measures — and will
+  be a few MB. The fact tables are 36M rows; even well compressed that is hundreds of MB,
+  against GitHub's hard 100 MB per-file limit, and Streamlit Community Cloud deploys from
+  a repo. So there is no "will it fit" question to answer later: **`peer_stats` ships in
+  the repo, and the fact-table Parquet is published as a GitHub Release asset** (2 GB per
+  file) and read remotely by DuckDB via `httpfs`. Both sizes above are estimates and are
+  marked as such until the build reports real ones (rule 7).
+
+- **That makes the layout levers load-bearing rather than illustrative.** Reading Parquet
+  over HTTP, DuckDB issues range requests, so zone-map pruning and projection pushdown
+  decide how many bytes the live app downloads per interaction — not merely how many
+  seconds a local benchmark takes. The right metric for levers 2 and 4 is therefore
+  **bytes read**, which is also the unit the sort-key prediction above is stated in
+  (~1 row group out of ~79).
+
+- **The claim the writeup defends** is *"interactive percentiles over 36M rows, served
+  from free-tier hosting,"* along the two paths measured separately: the **serving** path,
+  where precomputation replaces a live percentile scan (~1.3 s per CSV pass today, against
+  a keyed lookup), and the **drill-down** path, where a provider's own rows are fetched
+  from remote Parquet under the layout levers. The original framing — "how I got
+  interactive latency on 36M rows" — is not false, but it is misleading about the serving
+  path, which never touches 36M rows at query time.
+
 ## Open questions
 
-- **Streamlit Community Cloud resource limit.** The serving artifact must fit within
-  the platform's app resource limit (reported around 1 GB). Both the true limit and the
-  size of the peer-stats artifact need to be measured before hosting is assumed viable.
-- **Larger-than-memory behavior.** Only 2023 is downloaded, so the multi-year spill
-  scenario cannot be exercised yet. Either pull additional years or drop that lever from
-  the writeup; do not describe behavior that has not been observed.
+- **Cold latency over HTTP.** Remote Parquet reads have not been exercised at all. If
+  first-interaction latency turns out to be unacceptable, the fallback is a narrow
+  provider-lookup table shipped alongside `peer_stats` — but that is not designed for
+  until the number exists.
 - **Cold-cache timings.** Every timing measured so far is warm — the files had been read
   earlier in the same session. The CSV-vs-Parquet comparison needs both formats measured
   the same way, cold and warm, or the speedup figure is meaningless.
