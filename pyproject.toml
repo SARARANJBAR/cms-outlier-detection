@@ -11,6 +11,8 @@ dependencies = [
     "requests>=2.32",
     "pandas>=2.2",
     "duckdb>=1.5.5",
+    "streamlit>=1.61.1",
+    "altair>=6.2.2",
 ]
 
 [build-system]

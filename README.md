@@ -7,11 +7,11 @@ A portfolio project built on public CMS (Centers for Medicare & Medicaid Service
 An exploration of Medicare provider-level data (Part B billing and Part D prescribing) to surface outliers — providers whose utilization, cost, or prescribing patterns differ significantly from their peers (same specialty, same geography). The project has two parts:
 
 1. **SQL / data engineering** — real multi-table joins (providers, claims, drug/procedure reference data, geography), window functions for peer-relative outlier scoring, and a documented query optimization case study: *interactive percentiles over 36M rows, served from free-tier hosting*. Two paths, measured separately — the **serving** path, where a precomputed peer-statistics table replaces a live percentile scan, and the **drill-down** path, where the app reads remote Parquet over HTTP range requests and sort order, zone-map pruning and projection pushdown decide how many bytes come down the wire.
-2. **Streamlit app** — one screen: pick a specialty and a procedure or drug, see the peer-group distribution with a chosen provider marked on it, filter by state, and read what CMS censored out of the picture.
+2. **Streamlit app** — one screen: pick a specialty and a procedure or drug, see the peer-group distribution with a chosen provider marked on it, filter by state, and read what CMS censored out of the picture. Built and running locally.
 
 ## Status
 
-Full 2023 data pulled locally (9,660,647 rows / 2.9 GB for Part B, 26,794,878 rows / 3.6 GB for Part D) and explored end to end. Engine and storage format decided, schema designed, and the whole model now builds from the raw CSV with its integrity checks passing: 36.5M fact rows carrying precomputed peer ranks in 941 MB of Parquet, plus a 3.3 MB peer-statistics table that ships in the repo and answers the app's main query without touching the facts. The levers are measured in [notebook 03](notebooks/03_optimization.ipynb), reading the facts over a real HTTP server that counts bytes. Next: publishing the Release asset and measuring cold remote latency.
+Full 2023 data pulled locally (9,660,647 rows / 2.9 GB for Part B, 26,794,878 rows / 3.6 GB for Part D) and explored end to end. Engine and storage format decided, schema designed, and the whole model now builds from the raw CSV with its integrity checks passing: 36.5M fact rows carrying precomputed peer ranks in 941 MB of Parquet, plus a 3.3 MB peer-statistics table that ships in the repo and answers the app's main query without touching the facts. The levers are measured in [notebook 03](notebooks/03_optimization.ipynb), reading the facts over a real HTTP server that counts bytes. The screen runs locally against those artifacts. Next: LICENSE and attribution, an interpretation-and-limits section, and deploying.
 
 Decisions and findings so far:
 
@@ -40,7 +40,8 @@ src/cms_outliers/
   data/                      dataset catalog lookup + sample and full pull scripts
   sql/build.py               runs the SQL below: CSV -> typed, sorted Parquet
   measure.py                 counts bytes DuckDB fetches over HTTP range requests
-  app/                       (planned) Streamlit app
+  app/main.py                the one screen (Streamlit)
+  app/queries.py             the screen's SQL, runnable without a browser
 sql/
   build/                     the data model, one .sql file per table
   checks/                    grain and agreement assertions, run on every build
@@ -54,6 +55,24 @@ notebooks/
   02_distributions.ipynb     distributions, peer-group sizes and data quality, full data
   03_optimization.ipynb      the levers, measured — bytes over HTTP and query timings
 tests/
+```
+
+## Running it
+
+```bash
+uv sync
+uv run python -m cms_outliers.data.pull_full --dataset part_b --year 2023   # 2.9 GB
+uv run python -m cms_outliers.data.pull_full --dataset part_d --year 2023   # 3.6 GB
+uv run python -m cms_outliers.sql.build --year 2023                        # ~1 min
+uv run streamlit run src/cms_outliers/app/main.py
+```
+
+`peer_stats` is already in the repo, so the app's distributions work off a fresh clone. The
+two pulls and the build are what the provider-level drill-down needs. To check the model
+without downloading 6.5 GB, build against the committed 5k samples instead:
+
+```bash
+uv run python -m cms_outliers.sql.build --year 2023 --source samples
 ```
 
 ## Data source
