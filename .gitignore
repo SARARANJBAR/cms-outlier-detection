@@ -12,3 +12,8 @@ data/raw/*
 
 # macOS
 .DS_Store
+
+# Build artifacts: the Parquet layer is rebuilt from data/raw by cms_outliers.sql.build
+data/parquet/
+data/parquet-samples/
+data/.duckdb_tmp/

@@ -54,9 +54,21 @@ provider dimension, the engine would have to read the provider table and then al
 rows to discover which ones matched — and the pruning that justifies the storage format
 would never trigger.
 
-The cost is duplication across ~36M rows. In a row store that would be expensive; in
-columnar Parquet, a column holding one of 175 repeated strings compresses to close to
-nothing. Measure the actual footprint at build time rather than trusting that claim.
+The cost is duplication across ~36M rows, which in a row store would be expensive.
+Measured in the built Parquet ([`build_report.md`](build_report.md)), it comes to **3.4% of
+`fact_part_b_service` and 3.6% of `fact_part_d_drug`** — and the split inside that number
+is the interesting part:
+
+| Column | Part B bytes | Share |
+|---|---:|---:|
+| `specialty` | 9,211 | 0.004% |
+| `state` | 6,842,796 | 2.7% |
+| `ruca` | 1,920,553 | 0.7% |
+
+`specialty` — 9 KB for 9.66M rows — is free because it *is* the leading sort key, so the
+column arrives as a few long runs and encodes to nothing. `state` and `ruca` are not
+sorted, so they cost what an ordinary low-cardinality column costs. The lesson is that the
+sort key and the cheap column are the same decision, not two.
 
 ---
 
@@ -75,7 +87,8 @@ crosswalk is needed.
 | `npi` | VARCHAR | both | Natural key. Stored as text — it is an identifier, not a quantity |
 | `entity_type` | VARCHAR | Part B | `I` individual, `O` organization. Null for Part-D-only providers |
 | `last_or_org_name` | VARCHAR | both | |
-| `first_name`, `middle_initial` | VARCHAR | both | |
+| `first_name` | VARCHAR | both | |
+| `middle_initial` | VARCHAR | Part B | Part D has no middle-initial column at all |
 | `credentials` | VARCHAR | Part B | |
 | `specialty` | VARCHAR | both | 104 values in Part B, 175 in Part D — one shared taxonomy, Part D exercises more of it |
 | `street1`, `street2`, `zip5` | VARCHAR | Part B | Part B only. `zip5` **must** be text — leading zeros |
@@ -91,8 +104,11 @@ the Part B values and fall back to Part D. Providers appearing only in Part D wi
 null address detail, and that is expected, not an error.
 
 **Build-time check, not an assumption:** whether name and city agree between the two
-datasets for the 706,614 overlapping NPIs has **not** been measured. The build script
-must count disagreements and report them rather than silently picking one side.
+datasets for the overlapping NPIs is counted and reported by
+[`sql/checks/12_provider_attributes.sql`](../sql/checks/12_provider_attributes.sql)
+rather than assumed, along with whether any single NPI carries more than one name or city
+*within* a dataset — which is what would make the `any_value()` collapse lossy. Results in
+[`build_report.md`](build_report.md).
 
 ## `fact_part_b_service`
 
@@ -112,7 +128,7 @@ must count disagreements and report them rather than silently picking one side.
 | `avg_medicare_allowed` | DOUBLE | What Medicare allows |
 | `avg_medicare_payment` | DOUBLE | What Medicare actually paid |
 | `avg_medicare_standardized` | DOUBLE | Payment with geographic cost adjustment removed — the column for cross-region comparison |
-| `year` | INTEGER | Partition key. Not present in the source; set from which file was pulled |
+| `year` | BIGINT | Partition key. Not stored in the file — the Hive directory `year=2023/` carries it, which is the convention and stops the column existing twice on read. DuckDB infers it as BIGINT from the path |
 
 The `avg_*` columns are **per-service averages, not totals**. Total Medicare payment for
 a row is `tot_srvcs * avg_medicare_payment` — there is no total column. This distinction
@@ -136,19 +152,21 @@ decides what an outlier is: a provider can be ordinary on price and extreme on v
 | `tot_drug_cost` | DOUBLE | Never null. Already a total, unlike Part B |
 | `tot_benes` | BIGINT | **Null on 55.08% of rows** — see suppression below |
 | `ge65_*` | various | The 65+ breakdown and its suppression flags |
-| `year` | INTEGER | Partition key |
+| `year` | BIGINT | Partition key — carried by the Hive directory, not stored in the file |
 
 ## Reference dimensions
 
 | Table | Rows | Contents |
 |---|---|---|
-| `dim_hcpcs` | 6,405 | Code, description, drug indicator |
-| `dim_drug` | 3,027 brands / 1,779 generics | Brand → generic mapping. 63.8% of generics have exactly one brand; the rest average 1.77 and run to 50 |
-| `dim_geography` | 62 | State abbreviation, FIPS, and a flag for the 12 values that are not US states — territories, military codes, foreign |
-| `dim_ruca` | 22 | RUCA code and description |
+| `dim_hcpcs` | 6,405 | `hcpcs_code`, `hcpcs_desc`, `is_drug` (BOOLEAN, from CMS's Y/N indicator) |
+| `dim_drug` | 3,144 | `brand_name`, `generic_name`. Grain is the **pair**, covering 3,027 brands and 1,779 generics: 63.8% of generics have exactly one brand; the rest average 1.77 and run to 50, so neither column alone is a key |
+| `dim_geography` | 62 | `state`, `state_fips`, `category`, `is_us_state`. Category is one of `state` (50), `district` (DC), `territory` (AS GU MP PR VI), `freely_associated` (FM), `military` (AA AE AP), `unknown` (XX ZZ) |
+| `dim_ruca` | 22 | `ruca`, `ruca_desc`. Part B only — Part D carries no RUCA |
 
 `dim_geography` having 62 rows rather than 50 is the sort of thing that silently breaks a
-join later. It is a table, with a flag, so the non-states have to be handled deliberately.
+join later. It is a table, with a category and a flag, so the non-states have to be handled
+deliberately. The build asserts that exactly 50 rows land in the `state` category, because
+the SQL's `ELSE` branch would otherwise label a code CMS adds later as a US state.
 
 ## `peer_stats` — the serving layer
 
@@ -247,11 +265,35 @@ ratio on service count runs 4.1–14.2.
 Where price *does* vary within a group, that is itself worth surfacing: Diagnostic
 Radiology / 71046 (chest X-ray) sits at 3.34 against ~1.1 for everything around it.
 
+## How this is built
+
+[`src/cms_outliers/sql/build.py`](../src/cms_outliers/sql/build.py) turns the raw CSVs into
+this model. The model itself is SQL, one file per table in
+[`sql/build/`](../sql/build); the integrity checks are in
+[`sql/checks/`](../sql/checks); and every number the run measured lands in
+[`build_report.md`](build_report.md), which is regenerated rather than edited.
+
+```
+uv run python -m cms_outliers.sql.build --year 2023
+uv run python -m cms_outliers.sql.build --year 2023 --source samples   # 5k-row fixture
+```
+
+Output is one Parquet file per table per year at `data/parquet/<table>/year=2023/`. Types
+are declared rather than sniffed, which makes them assertions: DuckDB's own detection over
+all 36M rows reads NPI as BIGINT and RUCA as DOUBLE, and both would be quietly wrong here.
+
+## Resolved by the build
+
+- **Both fact grains are unique.** Zero duplicate keys on (`npi`, `hcpcs_code`,
+  `place_of_service`) and on (`npi`, `brand_name`, `generic_name`). CMS documents these
+  grains; now they are checked on every build rather than trusted.
+- **Provider attributes agree across datasets.** Zero name and zero city disagreements
+  across the 706,614 shared NPIs, on exact string equality — normalizing case and
+  whitespace changes nothing. No NPI carries more than one name or city within a dataset
+  either, so `dim_provider` collapsing the fact rows loses nothing.
+- **Fact-table sizes**: 247.5 MB (Part B) and 503.3 MB (Part D), from 6.5 GB of CSV.
+
 ## Open
 
-- Whether the fact-table grains are actually unique — (`npi`, `hcpcs_code`,
-  `place_of_service`) and (`npi`, `brand_name`, `generic_name`) — is documented by CMS
-  but unverified. The build script must assert it rather than assume.
-- Whether provider name and city agree across datasets for the 706,614 shared NPIs.
-- Measured size of `peer_stats` (ships in-repo) and of the fact-table Parquet (published
-  as a Release asset), plus bytes read per drill-down query — see ADR 0001.
+- Measured size of `peer_stats`, which does not exist yet, and bytes read per drill-down
+  query against the remote Parquet — see ADR 0001.

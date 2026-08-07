@@ -2,7 +2,7 @@
 
 Date: 2026-08-04
 
-Status: Accepted — amended 2026-08-06, see [Amendments](#amendments)
+Status: Accepted — amended 2026-08-06 and 2026-08-07, see [Amendments](#amendments)
 
 ## Context
 
@@ -168,12 +168,41 @@ measurement, and settling them changes what the optimization writeup is about.
   interactive latency on 36M rows" — is not false, but it is misleading about the serving
   path, which never touches 36M rows at query time.
 
+### 2026-08-07 — the build ran, and the estimates became measurements
+
+[`src/cms_outliers/sql/build.py`](../../src/cms_outliers/sql/build.py) now produces the
+Parquet layer. Full numbers in [`docs/build_report.md`](../build_report.md), which the
+build regenerates; the four that change what this ADR says:
+
+- **The delivery split has real sizes behind it.** `fact_part_b_service` is 247.5 MB and
+  `fact_part_d_drug` 503.3 MB, from the 6.5 GB of CSV. "Hundreds of MB" in the amendment above
+  was right: both are several times GitHub's 100 MB file limit and both sit comfortably
+  inside a Release asset's 2 GB. `peer_stats` is still an estimate, because it does not
+  exist yet.
+
+- **The row-group prediction held exactly.** 79 row groups in Part B against the ~79
+  predicted, and 219 in Part D against ~218. Lever 2 now has an exact denominator to state
+  its pruning against rather than an arithmetic guess.
+
+- **Both fact grains are unique, and the cross-dataset attribute question is answered.**
+  Zero duplicate keys on `(npi, hcpcs_code, place_of_service)` and on
+  `(npi, brand_name, generic_name)`. Across the 706,614 overlapping NPIs there are zero
+  name disagreements and zero city disagreements — exact string equality, no normalization
+  needed — and no NPI carries more than one name or city *within* a dataset either, so
+  collapsing the fact rows into one provider row loses nothing. Two open questions closed.
+
+- **The HTTP fallback turns out not to need narrowing.** The open question below proposed
+  a *narrow* provider-lookup table if remote reads are too slow. Measured, the entire
+  `dim_provider` is 38.5 MB — under the 100 MB limit as it stands. That is a large thing to
+  put in a git repo and not the first choice, but the fallback is known to be available
+  without designing a reduced table for it.
+
 ## Open questions
 
 - **Cold latency over HTTP.** Remote Parquet reads have not been exercised at all. If
-  first-interaction latency turns out to be unacceptable, the fallback is a narrow
-  provider-lookup table shipped alongside `peer_stats` — but that is not designed for
-  until the number exists.
+  first-interaction latency turns out to be unacceptable, the fallback is shipping
+  `dim_provider` alongside `peer_stats` — see the third amendment for why that is known to
+  fit — but it is not chosen until the number exists.
 - **Cold-cache timings.** Every timing measured so far is warm — the files had been read
   earlier in the same session. The CSV-vs-Parquet comparison needs both formats measured
   the same way, cold and warm, or the speedup figure is meaningless.
